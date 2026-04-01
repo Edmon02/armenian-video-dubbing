@@ -89,6 +89,7 @@ class ASRInference:
             )
 
             base_model_id = self.model_id
+            use_accelerate = False
 
             # Build quantization config if requested
             quant_config = None
@@ -101,6 +102,7 @@ class ASRInference:
                         bnb_4bit_compute_dtype=torch.float16,
                         bnb_4bit_quant_type="nf4",
                     )
+                    use_accelerate = True
                     logger.info("Using {}-bit quantization", self.quantize_bits)
                 except ImportError:
                     logger.warning("bitsandbytes not installed; falling back to fp16")
@@ -112,8 +114,16 @@ class ASRInference:
             if quant_config:
                 model_kwargs["quantization_config"] = quant_config
                 model_kwargs["device_map"] = "auto"
-            else:
-                model_kwargs["device_map"] = self.device
+
+            pipeline_kwargs = {
+                "task": "automatic-speech-recognition",
+                "torch_dtype": torch.float16 if self.use_fp16 else torch.float32,
+            }
+            if not use_accelerate:
+                if self.device == "cuda":
+                    pipeline_kwargs["device"] = 0
+                elif self.device == "cpu":
+                    pipeline_kwargs["device"] = -1
 
             # Try loading fine-tuned checkpoint first, fall back to base
             model_id = base_model_id
@@ -129,36 +139,36 @@ class ASRInference:
                 from peft import PeftModel
                 model = PeftModel.from_pretrained(model, str(self.model_path))
                 model = model.merge_and_unload()
+                if not use_accelerate and self.device != "cpu":
+                    model = model.to(self.device)
                 model.eval()
                 self.model = model
                 self.processor = WhisperProcessor.from_pretrained(base_model_id)
                 self._pipe = hf_pipeline(
-                    "automatic-speech-recognition",
                     model=self.model,
                     tokenizer=self.processor.tokenizer,
                     feature_extractor=self.processor.feature_extractor,
-                    torch_dtype=torch.float16 if self.use_fp16 else torch.float32,
-                    device=self.device,
+                    **pipeline_kwargs,
                 )
                 logger.info("ASR model loaded with LoRA adapter")
                 return
             else:
-                logger.info("Fine-tuned model not found, using base Whisper large-v3")
+                logger.info("Fine-tuned model not found, using base {}", base_model_id)
 
             self.processor = WhisperProcessor.from_pretrained(model_id)
             self.model = WhisperForConditionalGeneration.from_pretrained(
                 model_id,
                 **model_kwargs,
             )
+            if not use_accelerate and self.device != "cpu":
+                self.model = self.model.to(self.device)
             self.model.eval()
 
             self._pipe = hf_pipeline(
-                "automatic-speech-recognition",
                 model=self.model,
                 tokenizer=self.processor.tokenizer,
                 feature_extractor=self.processor.feature_extractor,
-                torch_dtype=torch.float16 if self.use_fp16 else torch.float32,
-                device=self.device,
+                **pipeline_kwargs,
             )
 
             logger.info("ASR model loaded ({})", model_id)
