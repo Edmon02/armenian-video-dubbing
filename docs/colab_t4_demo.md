@@ -29,13 +29,20 @@ The Colab profile therefore optimizes for one objective: get a short Armenian du
 Run these cells in order.
 
 ```bash
-!git clone https://github.com/Edmon02/armenian-video-dubbing.git
+!git clone --branch feat/colab-t4-demo-profile https://github.com/Edmon02/armenian-video-dubbing.git
 %cd armenian-video-dubbing
 !apt-get -qq update
 !apt-get -qq install -y ffmpeg rubberband-cli
+!pip install -q -U pip setuptools wheel
 !pip install -q -r requirements-colab.txt
 !pip install -q -e . --no-deps
 ```
+
+Notes:
+
+- The `r2u.stat.illinois.edu` apt warning is a Colab environment quirk and can be ignored if `ffmpeg` and `rubberband-cli` install successfully.
+- Colab may also print dependency conflict warnings for preinstalled notebook packages. Those warnings are not the blocking error for this repo.
+- The actual blocker fixed in this branch was the editable build backend in `pyproject.toml`.
 
 Optional sanity check:
 
