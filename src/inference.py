@@ -619,7 +619,7 @@ class TTSInference:
 
         # Map emotion to SSML prosody parameters
         emotion_prosody = {
-            "neutral": {"rate": "0%", "pitch": "0%", "volume": "0%"},
+            "neutral": {"rate": "+0%", "pitch": "+0Hz", "volume": "+0%"},
             "happy":   {"rate": "+10%", "pitch": "+5Hz", "volume": "+5%"},
             "sad":     {"rate": "-15%", "pitch": "-5Hz", "volume": "-10%"},
             "angry":   {"rate": "+5%", "pitch": "+10Hz", "volume": "+15%"},
