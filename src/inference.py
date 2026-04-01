@@ -526,7 +526,11 @@ class TTSInference:
         if self.backend == "fish-speech":
             return self._synthesize_fish_speech(text, reference_audio_path, emotion, language)
         elif self.backend == "edge-tts":
-            return self._synthesize_edge_tts(text, emotion, language)
+            try:
+                return self._synthesize_edge_tts(text, emotion, language)
+            except Exception as e:
+                logger.warning("edge-tts synthesis failed: {}, falling back to gTTS", e)
+                return self._synthesize_gtts(text, language)
         elif self.backend == "gtts":
             return self._synthesize_gtts(text, language)
         else:
@@ -594,57 +598,77 @@ class TTSInference:
         except ImportError:
             raise RuntimeError("edge-tts not installed. Run: pip install edge-tts")
 
-        # Voice selection based on language
-        voice_map = {
-            "hy": "hy-AM-AnahitNeural",  # Armenian female
-            "hy-male": "hy-AM-HaykNeural",  # Armenian male
-            "en": "en-US-JennyNeural",
-            "ru": "ru-RU-SvetlanaNeural",
-        }
+        normalized_language = {
+            "hye": "hy",
+            "hyw": "hy",
+        }.get(language, language)
 
-        voice = voice_map.get(language, voice_map.get("hy", "hy-AM-AnahitNeural"))
+        voice_candidates = {
+            "hy": [
+                "hy-AM-AnahitNeural",
+                "hy-AM-HaykNeural",
+                "en-US-AvaMultilingualNeural",
+                "en-US-AndrewMultilingualNeural",
+            ],
+            "en": ["en-US-JennyNeural", "en-US-GuyNeural"],
+            "ru": ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural"],
+        }
+        candidate_voices = voice_candidates.get(normalized_language, voice_candidates.get("hy", []))
+        if not candidate_voices:
+            candidate_voices = ["en-US-AvaMultilingualNeural"]
 
         # Map emotion to SSML prosody parameters
         emotion_prosody = {
             "neutral": {"rate": "0%", "pitch": "0%", "volume": "0%"},
-            "happy":   {"rate": "+10%", "pitch": "+5%", "volume": "+5%"},
-            "sad":     {"rate": "-15%", "pitch": "-5%", "volume": "-10%"},
-            "angry":   {"rate": "+5%", "pitch": "+10%", "volume": "+15%"},
-            "excited": {"rate": "+15%", "pitch": "+10%", "volume": "+10%"},
-            "calm":    {"rate": "-10%", "pitch": "-3%", "volume": "-5%"},
+            "happy":   {"rate": "+10%", "pitch": "+5Hz", "volume": "+5%"},
+            "sad":     {"rate": "-15%", "pitch": "-5Hz", "volume": "-10%"},
+            "angry":   {"rate": "+5%", "pitch": "+10Hz", "volume": "+15%"},
+            "excited": {"rate": "+15%", "pitch": "+10Hz", "volume": "+10%"},
+            "calm":    {"rate": "-10%", "pitch": "-3Hz", "volume": "-5%"},
         }
         prosody = emotion_prosody.get(emotion, emotion_prosody["neutral"])
 
-        # Build SSML with prosody tags for emotion
-        ssml_text = (
-            f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="hy-AM">'
-            f'<voice name="{voice}">'
-            f'<prosody rate="{prosody["rate"]}" pitch="{prosody["pitch"]}" volume="{prosody["volume"]}">'
-            f'{text}'
-            f'</prosody></voice></speak>'
-        )
-
-        # edge-tts is async, run in event loop
-        async def _do_tts():
+        async def _do_tts(voice: str):
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
                 tmp_mp3 = f.name
 
-            communicate = edge_tts.Communicate(ssml_text, voice)
+            communicate = edge_tts.Communicate(
+                text=text,
+                voice=voice,
+                rate=prosody["rate"],
+                pitch=prosody["pitch"],
+                volume=prosody["volume"],
+            )
             await communicate.save(tmp_mp3)
             return tmp_mp3
 
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # We're inside an async context (FastAPI), use nest_asyncio or thread
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, _do_tts())
-                    tmp_mp3 = future.result(timeout=60)
-            else:
-                tmp_mp3 = asyncio.run(_do_tts())
-        except RuntimeError:
-            tmp_mp3 = asyncio.run(_do_tts())
+        def _run_tts(voice: str) -> str:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, _do_tts(voice))
+                        return future.result(timeout=60)
+                return asyncio.run(_do_tts(voice))
+            except RuntimeError:
+                return asyncio.run(_do_tts(voice))
+
+        last_error = None
+        selected_voice = candidate_voices[0]
+        tmp_mp3 = None
+        for voice in candidate_voices:
+            try:
+                tmp_mp3 = _run_tts(voice)
+                selected_voice = voice
+                logger.info("edge-tts synthesis succeeded with voice {}", voice)
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning("edge-tts voice {} failed: {}", voice, e)
+
+        if tmp_mp3 is None:
+            raise RuntimeError(f"edge-tts failed for all candidate voices: {last_error}")
 
         # Convert mp3 to wav and load
         tmp_wav = tmp_mp3.replace(".mp3", ".wav")
@@ -670,7 +694,7 @@ class TTSInference:
             "text": text,
             "emotion": emotion,
             "backend": "edge-tts",
-            "voice": voice,
+            "voice": selected_voice,
         }
 
     def _synthesize_gtts(self, text: str, language: str) -> dict:
