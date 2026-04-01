@@ -39,6 +39,7 @@ PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.utils.logger import setup_logger
+from src.utils.config import load_config
 from src.utils.helpers import timer
 from src.training_utils import (
     AudioPreprocessor,
@@ -475,14 +476,14 @@ def main():
     parser.add_argument("--output-dir", type=str, default="models/tts/fish-speech-hy")
     parser.add_argument("--resume-from-checkpoint", type=str, default=None)
     parser.add_argument("--max-train-samples", type=int, default=None)
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--config-override", type=str, default=None)
 
     args = parser.parse_args()
     setup_logger()
 
     # Load config
-    config_path = Path("configs/config.yaml")
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
+    config = load_config(config_path=args.config, override_path=args.config_override)
 
     tts_config = config.get("tts", {})
     training_config = config.get("training", {}).get("tts", {})

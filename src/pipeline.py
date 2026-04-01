@@ -30,7 +30,6 @@ from typing import Optional
 
 import numpy as np
 import torch
-import yaml
 from loguru import logger
 
 from src.inference import (
@@ -40,6 +39,7 @@ from src.inference import (
     LipSyncInference,
     AudioPostProcessor,
 )
+from src.utils.config import load_config
 from src.utils.helpers import (
     extract_audio_from_video,
     get_video_info,
@@ -63,12 +63,29 @@ DIALECT_MAP = {
 class DubbingPipeline:
     """Complete video dubbing pipeline with segment-level alignment."""
 
-    def __init__(self, config_path: str = "configs/config.yaml"):
+    def __init__(
+        self,
+        config_path: Optional[str] = None,
+        config_override_path: Optional[str] = None,
+    ):
         """Initialize pipeline with configuration."""
-        with open(config_path) as f:
-            self.config = yaml.safe_load(f)
+        self.config = load_config(config_path=config_path, override_path=config_override_path)
 
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        project_cfg = self.config.get("project", {})
+        audio_cfg = self.config.get("audio", {})
+        asr_cfg = self.config.get("asr", {})
+        whisper_cfg = asr_cfg.get("whisper", {})
+        translation_cfg = self.config.get("translation", {})
+        tts_cfg = self.config.get("tts", {})
+        lipsync_cfg = self.config.get("lipsync", {})
+        inference_cfg = self.config.get("inference", {})
+
+        requested_device = project_cfg.get("device", "cuda")
+        if requested_device == "cuda" and not torch.cuda.is_available():
+            self.device = "cpu"
+        else:
+            self.device = requested_device
+
         logger.info("Using device: {}", self.device)
 
         # Read quantization setting from config
@@ -77,21 +94,87 @@ class DubbingPipeline:
         if inference_cfg.get("enable_quantization"):
             quant_bits = inference_cfg.get("quantization_bits", 0)
 
+        self.unload_models_after_stage = inference_cfg.get("unload_models_after_stage", False)
+        self.max_input_video_sec = inference_cfg.get("max_input_video_sec")
+        self.lipsync_enabled = lipsync_cfg.get("enabled", True)
+        self.background_separation_enabled = audio_cfg.get("demucs", {}).get("enabled", True)
+        self.loudness_target = audio_cfg.get("loudness_target", -14.0)
+        self.timing_method = self.config.get("timing", {}).get("method", "rubberband")
+        self.max_stretch_ratio = self.config.get("timing", {}).get("max_stretch_ratio", 1.25)
+        self.min_compress_ratio = self.config.get("timing", {}).get("min_compress_ratio", 0.80)
+
+        whisper_model = whisper_cfg.get("model", "large-v3")
+        if "/" in whisper_model:
+            whisper_model_id = whisper_model
+        else:
+            whisper_model_id = f"openai/whisper-{whisper_model}"
+
+        translation_model_source = self._resolve_model_source(
+            translation_cfg.get("model_path"),
+            translation_cfg.get("model", "facebook/seamless-m4t-v2-large"),
+        )
+
         # Initialize inference modules (lazy-loaded on first use)
-        self.asr = ASRInference(device=self.device, quantize_bits=quant_bits)
-        self.translator = TranslationInference(device=self.device)
-        self.tts = TTSInference(device=self.device)
-        self.lip_sync = LipSyncInference(device=self.device)
+        self.asr = ASRInference(
+            model_path=Path(whisper_cfg.get("model_path", "models/asr/whisper-hy-full")),
+            model_id=whisper_model_id,
+            device=self.device,
+            use_fp16=project_cfg.get("dtype", "float16") != "float32",
+            quantize_bits=quant_bits,
+            language=whisper_cfg.get("language", "hy"),
+            task=whisper_cfg.get("task", "transcribe"),
+            chunk_length_s=whisper_cfg.get("chunk_length_s", 30),
+            batch_size=whisper_cfg.get("batch_size", 8),
+        )
+        self.translator = TranslationInference(
+            model_id=translation_model_source,
+            device=self.device,
+            dtype=translation_cfg.get("dtype", project_cfg.get("dtype", "float16")),
+            num_beams=translation_cfg.get("num_beams", 5),
+            max_new_tokens=translation_cfg.get("max_length", 512),
+        )
+        self.tts = TTSInference(
+            model_path=Path(tts_cfg.get("fish_speech", {}).get("model_path", "models/tts/fish-speech-hy")),
+            device=self.device,
+            sample_rate=audio_cfg.get("sample_rate", 44100),
+            preferred_backend=tts_cfg.get("backend", "auto"),
+        )
+        self.lip_sync = LipSyncInference(
+            model_path=Path(lipsync_cfg.get("model_path", "models/lipsync/MuseTalk")),
+            device=self.device,
+        )
         self.audio_processor = AudioPostProcessor(
-            sample_rate=self.config.get("audio", {}).get("sample_rate", 44100)
+            sample_rate=audio_cfg.get("sample_rate", 44100),
+            enable_source_separation=self.background_separation_enabled,
         )
 
         # Ethics config
         self.ethics = self.config.get("ethics", {})
 
-        self.sr = self.config.get("audio", {}).get("sample_rate", 44100)
+        self.sr = audio_cfg.get("sample_rate", 44100)
         self.temp_dir = Path(self.config.get("paths", {}).get("temp_dir", "outputs/temp"))
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _resolve_model_source(local_path: Optional[str], fallback_model_id: str) -> str:
+        """Prefer a local model path if it exists, otherwise use the remote model id."""
+        if local_path:
+            model_path = Path(local_path)
+            if model_path.exists():
+                return str(model_path)
+        return fallback_model_id
+
+    def _maybe_unload(self, module, label: str) -> None:
+        """Unload a model between stages when using memory-constrained profiles."""
+        if not self.unload_models_after_stage:
+            return
+
+        try:
+            module.free_memory()
+            free_gpu_memory()
+            logger.info("Freed model memory after {} stage", label)
+        except Exception as e:
+            logger.debug("Memory cleanup after {} skipped: {}", label, e)
 
     def dub_video(
         self,
@@ -128,6 +211,20 @@ class DubbingPipeline:
             logger.error("Video file not found: {}", video_path)
             return {"error": "File not found"}
 
+        if self.max_input_video_sec:
+            try:
+                video_info = get_video_info(video_path)
+                video_duration = video_info.get("duration", 0.0)
+                if video_duration > self.max_input_video_sec:
+                    return {
+                        "error": (
+                            f"Input video is {video_duration:.1f}s, which exceeds the "
+                            f"configured Colab/runtime limit of {self.max_input_video_sec}s"
+                        )
+                    }
+            except Exception as e:
+                logger.warning("Could not inspect input video duration: {}", e)
+
         # Resolve dialect to language code
         tgt_lang = DIALECT_MAP.get(dialect, tgt_lang)
 
@@ -158,6 +255,7 @@ class DubbingPipeline:
                 transcription = self._transcribe_audio(audio_path)
                 if "error" in transcription:
                     return {"error": f"ASR failed: {transcription['error']}"}
+                self._maybe_unload(self.asr, "ASR")
 
                 segments = transcription.get("segments", [])
                 full_text = transcription.get("text", "")
@@ -166,6 +264,7 @@ class DubbingPipeline:
                 # Step 3: Translate each segment
                 logger.info("[Step 3/8] Translating {} segments...", len(segments))
                 translated_segments = self._translate_segments(segments, src_lang, tgt_lang)
+                self._maybe_unload(self.translator, "translation")
 
                 # Step 4: Synthesize speech per segment (TTS)
                 logger.info("[Step 4/8] Synthesizing speech (TTS)...")
@@ -175,6 +274,7 @@ class DubbingPipeline:
                     emotion=emotion,
                     language=tgt_lang,
                 )
+                self._maybe_unload(self.tts, "TTS")
 
                 # Step 5: Time-stretch segments and stitch into single audio
                 logger.info("[Step 5/8] Aligning segment durations...")
@@ -195,6 +295,7 @@ class DubbingPipeline:
                 if not skip_lipsync:
                     logger.info("[Step 7/8] Synchronizing lip movements...")
                     fused_video = self._apply_lipsync(video_path, final_audio)
+                    self._maybe_unload(self.lip_sync, "lip-sync")
                 else:
                     logger.info("[Step 7/8] Skipping lip-sync")
                     fused_video = video_path
@@ -334,13 +435,18 @@ class DubbingPipeline:
                 ratio = target_duration / audio_duration
 
                 if abs(ratio - 1.0) > 0.05:
-                    ratio = max(0.5, min(2.0, ratio))
+                    ratio = max(self.min_compress_ratio, min(self.max_stretch_ratio, ratio))
                     # Use rubberband for quality stretching
                     try:
                         tmp_in = self.temp_dir / f"seg_{i}_in.wav"
                         tmp_out = self.temp_dir / f"seg_{i}_out.wav"
                         save_audio(audio, tmp_in, sr=self.sr)
-                        time_stretch_audio(tmp_in, tmp_out, target_duration=target_duration)
+                        time_stretch_audio(
+                            tmp_in,
+                            tmp_out,
+                            target_duration=target_duration,
+                            method=self.timing_method,
+                        )
                         audio, _ = load_audio(tmp_out, sr=self.sr)
                     except Exception:
                         # Fallback: simple resampling
@@ -372,10 +478,14 @@ class DubbingPipeline:
         audio = self.audio_processor.denoise_audio(dubbed_audio)
 
         # Normalize loudness
-        audio = self.audio_processor.normalize_loudness(audio, target_loudness=-14.0)
+        audio = self.audio_processor.normalize_loudness(audio, target_loudness=self.loudness_target)
 
         # Mix with background if requested
         if original_audio_path:
+            if not self.background_separation_enabled:
+                logger.info("Background preservation disabled in config; skipping source separation")
+                return audio
+
             try:
                 bg_audio, _ = load_audio(original_audio_path, sr=self.sr)
 
@@ -396,6 +506,10 @@ class DubbingPipeline:
 
     def _apply_lipsync(self, video_path: Path, audio: np.ndarray) -> Path:
         """Apply lip-sync using MuseTalk."""
+        if not self.lipsync_enabled:
+            logger.info("Lip-sync disabled in config profile")
+            return video_path
+
         temp_audio = self.temp_dir / f"{video_path.stem}_dubbed_audio.wav"
         save_audio(audio, temp_audio, sr=self.sr)
 
@@ -517,13 +631,18 @@ def main():
                         help="Armenian dialect (default: eastern)")
     parser.add_argument("--config", type=str, default="configs/config.yaml",
                         help="Config file path")
+    parser.add_argument("--config-override", type=str, default=None,
+                        help="Optional override config merged on top of the base config")
 
     args = parser.parse_args()
 
     from src.utils.logger import setup_logger
     setup_logger()
 
-    pipeline = DubbingPipeline(config_path=args.config)
+    pipeline = DubbingPipeline(
+        config_path=args.config,
+        config_override_path=args.config_override,
+    )
     result = pipeline.dub_video(
         video_path=args.video,
         reference_speaker_audio=args.reference_speaker,

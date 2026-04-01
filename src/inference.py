@@ -22,6 +22,22 @@ import torch
 from loguru import logger
 
 
+def _resolve_torch_dtype(dtype_name: str, device: str) -> torch.dtype:
+    """Resolve a string dtype name into a torch dtype compatible with the device."""
+    if device == "cpu":
+        return torch.float32
+
+    dtype_map = {
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+    }
+    return dtype_map.get(dtype_name.lower(), torch.float16)
+
+
 # ============================================================================
 # ASR Inference
 # ============================================================================
@@ -36,14 +52,24 @@ class ASRInference:
     def __init__(
         self,
         model_path: Path = Path("models/asr/whisper-hy-full"),
+        model_id: str = "openai/whisper-large-v3",
         device: str = "cuda",
         use_fp16: bool = True,
         quantize_bits: int = 0,
+        language: str = "hy",
+        task: str = "transcribe",
+        chunk_length_s: int = 30,
+        batch_size: int = 8,
     ):
         self.model_path = Path(model_path)
+        self.model_id = model_id
         self.device = device
         self.use_fp16 = use_fp16
         self.quantize_bits = quantize_bits  # 0=off, 4=int4, 8=int8
+        self.language = language
+        self.task = task
+        self.chunk_length_s = chunk_length_s
+        self.batch_size = batch_size
         self.model = None
         self.processor = None
         self._pipe = None  # faster-whisper / HF pipeline
@@ -62,7 +88,7 @@ class ASRInference:
                 pipeline as hf_pipeline,
             )
 
-            base_model_id = "openai/whisper-large-v3"
+            base_model_id = self.model_id
 
             # Build quantization config if requested
             quant_config = None
@@ -150,12 +176,12 @@ class ASRInference:
             result = self._pipe(
                 audio_path,
                 generate_kwargs={
-                    "language": "armenian",
-                    "task": "transcribe",
+                    "language": "armenian" if self.language in {"hy", "hye", "armenian"} else self.language,
+                    "task": self.task,
                 },
                 return_timestamps=True,
-                chunk_length_s=30,
-                batch_size=8,
+                chunk_length_s=self.chunk_length_s,
+                batch_size=self.batch_size,
             )
 
             # Build segments from chunks
@@ -233,9 +259,15 @@ class TranslationInference:
         self,
         model_id: str = "facebook/seamless-m4t-v2-large",
         device: str = "cuda",
+        dtype: str = "float16",
+        num_beams: int = 5,
+        max_new_tokens: int = 512,
     ):
         self.model_id = model_id
         self.device = device
+        self.dtype = dtype
+        self.num_beams = num_beams
+        self.max_new_tokens = max_new_tokens
         self.model = None
         self.processor = None
         self.tokenizer = None
@@ -250,10 +282,12 @@ class TranslationInference:
         try:
             from transformers import AutoProcessor, SeamlessM4Tv2ForTextToText
 
+            torch_dtype = _resolve_torch_dtype(self.dtype, self.device)
+
             self.processor = AutoProcessor.from_pretrained(self.model_id)
             self.model = SeamlessM4Tv2ForTextToText.from_pretrained(
                 self.model_id,
-                torch_dtype=torch.float16,
+                torch_dtype=torch_dtype,
                 low_cpu_mem_usage=True,
             ).to(self.device)
             self.model.eval()
@@ -297,8 +331,8 @@ class TranslationInference:
                 output_tokens = self.model.generate(
                     **inputs,
                     tgt_lang=tgt_lang,
-                    num_beams=5,
-                    max_new_tokens=512,
+                    num_beams=self.num_beams,
+                    max_new_tokens=self.max_new_tokens,
                 )
 
             translated_text = self.processor.batch_decode(
@@ -371,10 +405,12 @@ class TTSInference:
         model_path: Path = Path("models/tts/fish-speech-hy"),
         device: str = "cuda",
         sample_rate: int = 44100,
+        preferred_backend: str = "auto",
     ):
         self.model_path = Path(model_path)
         self.device = device
         self.sample_rate = sample_rate
+        self.preferred_backend = preferred_backend
         self.backend = None  # "fish-speech" or "edge-tts"
         self.model = None
         self.encoder = None
@@ -384,34 +420,43 @@ class TTSInference:
         if self.backend is not None:
             return
 
-        # Try Fish-Speech first
+        backend_order = []
+        if self.preferred_backend and self.preferred_backend != "auto":
+            backend_order.append(self.preferred_backend)
+        backend_order.extend(
+            backend for backend in ["fish-speech", "edge-tts", "gtts"]
+            if backend not in backend_order
+        )
+
         fish_dir = Path("externals/fish-speech")
-        if fish_dir.exists() and (fish_dir / "fish_speech").exists():
-            try:
-                self._load_fish_speech()
-                self.backend = "fish-speech"
-                logger.info("TTS backend: Fish-Speech S2 Pro")
-                return
-            except Exception as e:
-                logger.warning("Fish-Speech failed to load: {}, falling back to edge-tts", e)
+        for backend in backend_order:
+            if backend == "fish-speech":
+                if fish_dir.exists() and (fish_dir / "fish_speech").exists():
+                    try:
+                        self._load_fish_speech()
+                        self.backend = "fish-speech"
+                        logger.info("TTS backend: Fish-Speech S2 Pro")
+                        return
+                    except Exception as e:
+                        logger.warning("Fish-Speech failed to load: {}", e)
 
-        # Fall back to edge-tts (always available via pip)
-        try:
-            import edge_tts  # noqa: F401
-            self.backend = "edge-tts"
-            logger.info("TTS backend: edge-tts (Microsoft)")
-            return
-        except ImportError:
-            pass
+            if backend == "edge-tts":
+                try:
+                    import edge_tts  # noqa: F401
+                    self.backend = "edge-tts"
+                    logger.info("TTS backend: edge-tts (Microsoft)")
+                    return
+                except ImportError:
+                    continue
 
-        # Last resort: gTTS
-        try:
-            import gtts  # noqa: F401
-            self.backend = "gtts"
-            logger.info("TTS backend: gTTS (Google)")
-            return
-        except ImportError:
-            pass
+            if backend == "gtts":
+                try:
+                    import gtts  # noqa: F401
+                    self.backend = "gtts"
+                    logger.info("TTS backend: gTTS (Google)")
+                    return
+                except ImportError:
+                    continue
 
         raise RuntimeError(
             "No TTS backend available. Install one of: "
@@ -853,8 +898,9 @@ class LipSyncInference:
 class AudioPostProcessor:
     """Post-process dubbed audio: source separation, denoise, normalize, mix."""
 
-    def __init__(self, sample_rate: int = 44100):
+    def __init__(self, sample_rate: int = 44100, enable_source_separation: bool = True):
         self.sample_rate = sample_rate
+        self.enable_source_separation = enable_source_separation
         self.demucs = None
 
     def load_demucs(self):
@@ -876,6 +922,9 @@ class AudioPostProcessor:
 
         Returns dict with keys: vocals, drums, bass, other
         """
+        if not self.enable_source_separation:
+            return {"vocals": audio, "accompaniment": np.zeros_like(audio)}
+
         self.load_demucs()
         if self.demucs is None:
             return {"vocals": audio, "accompaniment": np.zeros_like(audio)}
