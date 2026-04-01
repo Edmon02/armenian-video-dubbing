@@ -40,10 +40,10 @@ class TestASRInference:
         # Mock the pipeline so we don't download the model
         asr.model = MagicMock()
         asr._pipe = MagicMock(return_value={
-            "text": "Բարև ձdelays",
+            "text": "Բարև ձեզ",
             "chunks": [
                 {"text": "Բարև", "timestamp": (0.0, 1.0)},
-                {"text": "ձезды", "timestamp": (1.0, 2.0)},
+                {"text": "ձեզ", "timestamp": (1.0, 2.0)},
             ],
         })
 
@@ -82,7 +82,7 @@ class TestTranslationInference:
         t.model = MagicMock()
         t.processor = MagicMock()
         t.processor.return_value = {"input_ids": MagicMock(to=MagicMock(return_value=MagicMock()))}
-        t.processor.batch_decode = MagicMock(return_value=["Բարադdelays Աշխdelays"])
+        t.processor.batch_decode = MagicMock(return_value=["Բարև աշխարհ"])
         t.model.generate = MagicMock(return_value=MagicMock())
 
         segments = [

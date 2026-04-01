@@ -10,9 +10,9 @@ search:
   max_duration_sec: 36000
   queries:
     # ===== News & Public Affairs =====
-    - "Հայաստանի Հանրային Հեռուdelays"
+    - "Հայաստանի Հանրային Հեռուստատեսություն"
     - "1TV Armenia"
-    - "Armenia TV նparts"
+    - "Armenia TV նորություններ"
     - "Shant TV"
     - "ArmNews TV"
     - "Azatutyun Radio Armenian"
