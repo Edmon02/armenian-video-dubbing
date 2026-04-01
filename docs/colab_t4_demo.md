@@ -52,7 +52,27 @@ Optional sanity check:
 
 ## Short-Video Inference
 
-Use this for the first successful run:
+`dubbed_short.mp4` is the output file produced by the pipeline. You do not need to find it in advance.
+
+If you do not already have a short source video, generate a safe synthetic `input_short.mp4` first:
+
+```bash
+!python scripts/inference/prepare_demo_video.py \
+  --mode generate \
+  --output /content/input_short.mp4
+```
+
+If you already have your own uploaded video and want to trim it down for Colab:
+
+```bash
+!python scripts/inference/prepare_demo_video.py \
+  --mode trim \
+  --input /content/my_video.mp4 \
+  --duration 15 \
+  --output /content/input_short.mp4
+```
+
+Then use this for the first successful dubbing run:
 
 ```bash
 !python -m src.pipeline /content/input_short.mp4 \
@@ -74,6 +94,8 @@ If you want the Gradio UI in Colab:
 ```
 
 ## Smoke-Test Training
+
+For the training smoke tests below, `input_short.mp4` is not used directly. Those scripts expect dataset manifests and audio-text pairs, not a single demo video clip.
 
 ### ASR LoRA Smoke Test
 
