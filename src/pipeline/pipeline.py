@@ -252,7 +252,7 @@ class DubbingPipeline:
 
                 # Step 2: Transcribe (ASR) with timestamps
                 logger.info("[Step 2/8] Transcribing audio (ASR)...")
-                transcription = self._transcribe_audio(audio_path)
+                transcription = self._transcribe_audio(audio_path, src_lang=src_lang)
                 if "error" in transcription:
                     return {"error": f"ASR failed: {transcription['error']}"}
                 self._maybe_unload(self.asr, "ASR")
@@ -260,6 +260,19 @@ class DubbingPipeline:
                 segments = transcription.get("segments", [])
                 full_text = transcription.get("text", "")
                 logger.info("  Transcribed {} segments, {} chars", len(segments), len(full_text))
+
+                if not full_text.strip():
+                    logger.warning("ASR produced empty transcription — nothing to dub")
+                    return {
+                        "status": "success",
+                        "output_video": str(output_path),
+                        "transcription": "",
+                        "translated_text": "",
+                        "n_segments": 0,
+                        "emotion": emotion,
+                        "duration_sec": 0.0,
+                        "warning": "No speech detected in audio",
+                    }
 
                 # Step 3: Translate each segment
                 logger.info("[Step 3/8] Translating {} segments...", len(segments))
@@ -338,10 +351,13 @@ class DubbingPipeline:
 
         return extract_audio_from_video(video_path, output_audio, sr=self.sr)
 
-    def _transcribe_audio(self, audio_path: Path) -> dict:
-        """Transcribe audio with segment-level timestamps."""
+    def _transcribe_audio(self, audio_path: Path, src_lang: str = "eng") -> dict:
+        """Transcribe audio with segment-level timestamps.
+
+        Uses the source language to guide Whisper (e.g. 'eng' for English input).
+        """
         self.asr.load()
-        return self.asr.transcribe(str(audio_path))
+        return self.asr.transcribe(str(audio_path), language=src_lang)
 
     def _translate_segments(
         self, segments: list, src_lang: str, tgt_lang: str

@@ -177,16 +177,28 @@ class ASRInference:
             logger.error("Failed to load ASR model: {}", e)
             raise
 
-    def transcribe(self, audio_path: str) -> dict:
-        """Transcribe audio file and return segment-level results with timestamps."""
+    def transcribe(self, audio_path: str, language: str = None) -> dict:
+        """Transcribe audio file and return segment-level results with timestamps.
+
+        Args:
+            audio_path: Path to audio file.
+            language: Override language for transcription.  Accepts ISO 639-1
+                (e.g. "en", "hy"), ISO 639-3 (e.g. "eng", "hye"), or full
+                names ("english", "armenian").  Falls back to the instance
+                default (self.language) if not provided.
+        """
         if self.model is None:
             self.load()
+
+        # Resolve language to a form Whisper understands
+        lang = language or self.language
+        whisper_lang = self._resolve_whisper_language(lang)
 
         try:
             result = self._pipe(
                 audio_path,
                 generate_kwargs={
-                    "language": "armenian" if self.language in {"hy", "hye", "armenian"} else self.language,
+                    "language": whisper_lang,
                     "task": self.task,
                 },
                 return_timestamps=True,
@@ -215,9 +227,22 @@ class ASRInference:
             import librosa
             duration = librosa.get_duration(path=audio_path)
 
+            full_text = result["text"].strip()
+
+            # Filter out hallucinated segments (Whisper hallucinates on silence)
+            if self._is_hallucinated(full_text):
+                logger.warning("ASR output looks hallucinated, replacing with empty")
+                full_text = ""
+                segments = [{"text": "", "start": 0.0, "end": duration}]
+            else:
+                # Also filter individual segments
+                for seg in segments:
+                    if self._is_hallucinated(seg["text"]):
+                        seg["text"] = ""
+
             return {
-                "text": result["text"].strip(),
-                "language": "hy",
+                "text": full_text,
+                "language": whisper_lang,
                 "segments": segments,
                 "duration_sec": duration,
             }
@@ -252,6 +277,44 @@ class ASRInference:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
         gc.collect()
+
+    @staticmethod
+    def _resolve_whisper_language(lang: str) -> str:
+        """Map various language code formats to Whisper-compatible names."""
+        _MAP = {
+            # ISO 639-3 → Whisper
+            "eng": "english",
+            "hye": "armenian",
+            "hyw": "armenian",
+            "rus": "russian",
+            "fra": "french",
+            "deu": "german",
+            "spa": "spanish",
+            # ISO 639-1 → Whisper
+            "en": "english",
+            "hy": "armenian",
+            "ru": "russian",
+            "fr": "french",
+            "de": "german",
+            "es": "spanish",
+            # Already full names
+            "english": "english",
+            "armenian": "armenian",
+        }
+        return _MAP.get(lang.lower(), lang)
+
+    @staticmethod
+    def _is_hallucinated(text: str) -> bool:
+        """Detect Whisper hallucination (repetitive garbage on silence)."""
+        if not text or len(text) < 10:
+            return True
+        # Split into tokens and check repetition ratio
+        tokens = text.replace(",", " ").split()
+        if len(tokens) < 3:
+            return False
+        unique_ratio = len(set(tokens)) / len(tokens)
+        # If >80% of tokens are identical, it's hallucination
+        return unique_ratio < 0.2
 
 
 # ============================================================================
@@ -378,10 +441,20 @@ class TranslationInference:
         """
         translated_segments = []
         for seg in segments:
-            result = self.translate(seg["text"], src_lang, tgt_lang)
+            text = seg.get("text", "").strip()
+            if not text:
+                # Preserve timing for empty/silent segments
+                translated_segments.append({
+                    "text": "",
+                    "src_text": "",
+                    "start": seg["start"],
+                    "end": seg["end"],
+                })
+                continue
+            result = self.translate(text, src_lang, tgt_lang)
             translated_segments.append({
                 "text": result["tgt_text"],
-                "src_text": seg["text"],
+                "src_text": text,
                 "start": seg["start"],
                 "end": seg["end"],
             })

@@ -24,13 +24,43 @@ def download_tiny_cv(
     output_dir: Path,
     max_train: int = 80,
     max_val: int = 20,
-    version: str = "17_0",
+    version: str = "17.0",
 ):
     """Download a tiny slice of Common Voice hy-AM and write manifests."""
     from datasets import load_dataset
 
-    dataset_name = f"mozilla-foundation/common_voice_{version}"
-    logger.info("Loading {} hy-AM (streaming)...", dataset_name)
+    # Try multiple dataset name formats — HuggingFace naming varies by version
+    candidate_names = [
+        f"mozilla-foundation/common_voice_{version.replace('.', '_')}",
+        f"mozilla-foundation/common_voice_{version}",
+    ]
+    # Also try older versions as fallback
+    fallback_versions = ["16.1", "16.0", "13.0"]
+    for fv in fallback_versions:
+        candidate_names.append(f"mozilla-foundation/common_voice_{fv.replace('.', '_')}")
+        candidate_names.append(f"mozilla-foundation/common_voice_{fv}")
+
+    dataset_name = None
+    for name in candidate_names:
+        logger.info("Trying dataset: {} ...", name)
+        try:
+            test_ds = load_dataset(
+                name, "hy-AM", split="train", trust_remote_code=True, streaming=True,
+            )
+            # Verify we can actually read a sample
+            next(iter(test_ds))
+            dataset_name = name
+            logger.info("Using dataset: {}", dataset_name)
+            break
+        except Exception as e:
+            logger.debug("  {} did not work: {}", name, e)
+            continue
+
+    if dataset_name is None:
+        raise RuntimeError(
+            "Could not load any Common Voice hy-AM dataset. "
+            "Tried: " + ", ".join(candidate_names)
+        )
 
     audio_dir = output_dir / "audio"
     manifest_dir = output_dir / "manifests"
@@ -130,7 +160,7 @@ def main():
     parser.add_argument("--output-dir", default="data/common_voice", help="Output directory")
     parser.add_argument("--max-train", type=int, default=80)
     parser.add_argument("--max-val", type=int, default=20)
-    parser.add_argument("--version", default="17_0", help="Common Voice dataset version tag")
+    parser.add_argument("--version", default="17.0", help="Common Voice dataset version tag")
     args = parser.parse_args()
 
     from src.utils.logger import setup_logger
