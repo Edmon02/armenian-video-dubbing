@@ -124,7 +124,7 @@ def setup_whisper_lora(
     lora_alpha = lora_config.get("lora_alpha", 64)
     lora_dropout = lora_config.get("lora_dropout", 0.05)
     lora_bias = lora_config.get("bias", "none")
-    lora_target = lora_config.get("target_modules", ["q", "v"])
+    lora_target = lora_config.get("target_modules", ["q_proj", "v_proj"])
 
     logger.info("Loading {} model...", model_id)
     model = WhisperForConditionalGeneration.from_pretrained(
