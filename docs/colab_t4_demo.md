@@ -97,6 +97,19 @@ If you want the Gradio UI in Colab:
 
 For the training smoke tests below, `input_short.mp4` is not used directly. Those scripts expect dataset manifests and audio-text pairs, not a single demo video clip.
 
+### Download Tiny Common Voice Subset
+
+Before training, download a small slice of Common Voice hy-AM (80 train + 20 validation):
+
+```bash
+!python scripts/data_collection/download_cv_tiny.py \
+  --output-dir data/common_voice \
+  --max-train 80 \
+  --max-val 20
+```
+
+This uses HuggingFace streaming and only downloads the samples you need (~2-3 minutes).
+
 ### ASR LoRA Smoke Test
 
 This is the most realistic training test on a T4 in the current repo.

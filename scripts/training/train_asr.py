@@ -117,13 +117,14 @@ def setup_whisper_lora(
 ) -> tuple:
     """Load Whisper model with LoRA adapter."""
     if lora_config is None:
-        lora_config = {
-            "r": 32,
-            "lora_alpha": 64,
-            "lora_dropout": 0.05,
-            "bias": "none",
-            "target_modules": ["q", "v"],  # Query & Value projections
-        }
+        lora_config = {}
+
+    # Normalize keys: colab profile uses lora_r, standard uses r
+    lora_r = lora_config.get("r", lora_config.get("lora_r", 32))
+    lora_alpha = lora_config.get("lora_alpha", 64)
+    lora_dropout = lora_config.get("lora_dropout", 0.05)
+    lora_bias = lora_config.get("bias", "none")
+    lora_target = lora_config.get("target_modules", ["q", "v"])
 
     logger.info("Loading {} model...", model_id)
     model = WhisperForConditionalGeneration.from_pretrained(
@@ -138,14 +139,14 @@ def setup_whisper_lora(
         param.requires_grad = False
 
     # Add LoRA adapter
-    logger.info("Adding LoRA adapter: r={}, alpha={}", lora_config["r"], lora_config["lora_alpha"])
+    logger.info("Adding LoRA adapter: r={}, alpha={}", lora_r, lora_alpha)
     peft_config = LoraConfig(
         task_type=TaskType.SEQ_2_SEQ_LM,
-        r=lora_config["r"],
-        lora_alpha=lora_config["lora_alpha"],
-        lora_dropout=lora_config["lora_dropout"],
-        bias=lora_config["bias"],
-        target_modules=lora_config["target_modules"],
+        r=lora_r,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        bias=lora_bias,
+        target_modules=lora_target,
     )
 
     model = get_peft_model(model, peft_config)
@@ -240,14 +241,28 @@ def train_asr(
     logger.info("Train samples: {}", len(train_dataset))
     logger.info("Eval samples: {}", len(eval_dataset))
 
-    # Data collator
-    data_collator = DataCollatorASRWithPadding(
-        processor=type('obj', (object,), {
-            'feature_extractor': feature_extractor,
-            'tokenizer': tokenizer,
-        })(),
-        sample_rate=training_args.get("sample_rate", 16000),
-    )
+    # Data collator for already-preprocessed features.
+    # The dataset was already .map()-ed to contain input_features and labels,
+    # so we just need to pad labels (features are fixed-size from Whisper).
+    from dataclasses import dataclass
+
+    @dataclass
+    class PreprocessedASRCollator:
+        pad_token_id: int = -100
+
+        def __call__(self, batch):
+            import torch as _torch
+
+            input_features = _torch.tensor(
+                [s["input_features"] for s in batch], dtype=_torch.float32
+            )
+            label_lists = [s["labels"] for s in batch]
+            max_len = max(len(l) for l in label_lists)
+            padded = [l + [self.pad_token_id] * (max_len - len(l)) for l in label_lists]
+            labels = _torch.tensor(padded, dtype=_torch.long)
+            return {"input_features": input_features, "labels": labels}
+
+    data_collator = PreprocessedASRCollator(pad_token_id=-100)
 
     # Trainer
     trainer = Seq2SeqTrainer(
@@ -272,7 +287,7 @@ def train_asr(
             fp16=torch.cuda.get_device_capability()[0] < 8,   # float16 fallback
             logging_steps=100,
             logging_dir=str(output_dir / "logs"),
-            dataloader_num_workers=4,
+            dataloader_num_workers=training_args.get("dataloader_workers", 2),
             remove_unused_columns=False,
             label_names=["labels"],
         ),
