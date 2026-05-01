@@ -10,7 +10,7 @@ The short version:
 - Use FLEURS Armenian for a cleaner held-out benchmark
 - Treat full lip-sync, Demucs-heavy audio restoration, and serious Fish-Speech training as larger-GPU tasks
 
-If you are using a single `H100 80 GB`, the advanced path in this guide now has a dedicated profile: `configs/profiles/lightning_h100_full.yaml`.
+If you are using a single `A100 80 GB`, the advanced path in this guide now has a dedicated profile: `configs/profiles/lightning_a100_80gb_full.yaml`.
 
 ## What The Docs Say After Review
 
@@ -28,12 +28,12 @@ Use this decision table instead of choosing the largest GPU blindly.
 |------|-------------|-----|
 | First successful run | `T4` | Cheapest path, enough for the repo's low-VRAM profile |
 | Better stability for short demos | `L4` | More VRAM than T4, still practical for trial work |
-| Advanced end-to-end tests with fewer compromises | `A100 40 GB` or `L40S` | Enough headroom for larger models and fewer unload/reload cycles |
+| Advanced end-to-end tests with fewer compromises | `A100 40 GB`, `A100 80 GB`, or `L40S` | Enough headroom for larger models and fewer unload/reload cycles |
 | Serious lip-sync + heavier post-processing + bigger batches | `H100`, `H200`, `RTXP 6000` | This is where the full-stack ambition becomes more realistic |
 
 ### Best Single-GPU Choice For This Repo
 
-If you have already chosen `1x H100 80 GB`, use that as the main machine for advanced validation. It is the best single-GPU option in Lightning for this repository when your goal is to test the most complete path on one box.
+If you have already chosen `1x A100 80 GB`, use that as the main machine for advanced validation. It is a strong single-GPU option in Lightning for this repository and is enough for the best practical one-box path here.
 
 ### Recommended Starting Point
 
@@ -62,7 +62,7 @@ Based on the repository docs and Lightning's current Studio/free-tier limits, th
 - Light post-processing re-enabled
 - Slightly larger ASR training subsets
 
-### Best Practical Single-GPU H100 Scope
+### Best Practical Single-GPU A100 80GB Scope
 
 - 1 to 3 minute clips for advanced testing
 - Whisper `large-v3`
@@ -71,6 +71,8 @@ Based on the repository docs and Lightning's current Studio/free-tier limits, th
 - Demucs re-enabled
 - MuseTalk re-enabled for selected clips
 - Better export and publishing workflow for trained artifacts
+
+The H100 path remains useful if you later want even more headroom, but the A100 80GB path is the right target for your current setup.
 
 ### Not A Good First Free-Tier Target
 
@@ -235,12 +237,12 @@ Why not start with the full production environment:
 - it increases the chance of dependency issues
 - it does not buy you anything for the first Lightning trial
 
-For an `H100 80 GB` Studio, this tradeoff changes. After the first environment sanity check, install the full project dependencies or your training extras before you start long runs.
+For an `A100 80 GB` Studio, this tradeoff changes. After the first environment sanity check, install the full project dependencies or your training extras before you start long runs.
 
 You can also bootstrap the Studio with one command from the repository root:
 
 ```bash
-bash scripts/deployment/setup_lightning_h100.sh
+bash scripts/deployment/setup_lightning_a100.sh
 ```
 
 At minimum, make sure Hugging Face publishing support is available in the environment you use for release packaging:
@@ -330,18 +332,18 @@ python3 -m src.pipeline outputs/temp/input_short.mp4 \
   --config-override configs/profiles/lightning_l4_demo.yaml
 ```
 
-If you are on `H100 80 GB` and want the best single-GPU path in this repository:
+If you are on `A100 80 GB` and want the best single-GPU path for your current setup:
 
 ```bash
 python3 -m src.pipeline outputs/temp/input_short.mp4 \
-  --output outputs/video/dubbed_short_h100.mp4 \
+  --output outputs/video/dubbed_short_a100.mp4 \
   --src-lang eng \
   --dialect eastern \
   --emotion neutral \
-  --config-override configs/profiles/lightning_h100_full.yaml
+  --config-override configs/profiles/lightning_a100_80gb_full.yaml
 ```
 
-For H100 bring-up, still start with a short clip. After that succeeds, move to longer clips and selectively test lip-sync and Demucs-heavy runs.
+For A100 bring-up, still start with a short clip. After that succeeds, move to longer clips and selectively test lip-sync and Demucs-heavy runs.
 
 ## 9. Download Training And Evaluation Data
 
@@ -390,16 +392,16 @@ Expected result:
 - produces a small adapter/checkpoint
 - does not yet prove production quality
 
-For a stronger H100 run, increase sample counts and use the H100 profile:
+For a stronger A100 run, increase sample counts and use the A100 profile:
 
 ```bash
 python3 scripts/training/train_asr.py \
   --dataset-type common_voice \
   --cv-dir data/common_voice/manifests \
-  --output-dir models/asr/whisper-hy-h100 \
+  --output-dir models/asr/whisper-hy-a100 \
   --max-train-samples 2000 \
   --max-eval-samples 200 \
-  --config-override configs/profiles/lightning_h100_full.yaml
+  --config-override configs/profiles/lightning_a100_80gb_full.yaml
 ```
 
 ## 11. Optional TTS Smoke Test
@@ -417,7 +419,7 @@ python3 scripts/training/train_tts.py \
 
 Interpret this as a pipeline test, not a final TTS-quality benchmark.
 
-For an H100-quality pass, prefer consented studio speech rather than Common Voice and run with the H100 profile.
+For an A100-quality pass, prefer consented studio speech rather than Common Voice and run with the A100 profile.
 
 ## 11.5 Package And Push Models To Hugging Face
 
@@ -434,11 +436,11 @@ Example upload for ASR, TTS, and translation artifacts:
 ```bash
 python3 scripts/training/export_models.py \
   --models asr tts translation \
-  --asr-model models/asr/whisper-hy-h100 \
+  --asr-model models/asr/whisper-hy-a100 \
   --tts-model models/tts/fish-speech-hy-lightning-smoke \
   --translation-model models/translation/seamless-m4t-v2-large \
-  --output-dir models/releases/h100 \
-  --profile configs/profiles/lightning_h100_full.yaml \
+  --output-dir models/releases/a100 \
+  --profile configs/profiles/lightning_a100_80gb_full.yaml \
   --push-to-hub \
   --hf-namespace YOUR_HF_USERNAME \
   --repo-prefix armenian-video-dubbing \
@@ -453,13 +455,13 @@ This creates or reuses these model repositories:
 
 If you want public repos, remove `--private`.
 
-For repeated H100 releases, use the wrapper script instead of retyping the full command:
+For repeated A100 releases, use the wrapper script instead of retyping the full command:
 
 ```bash
 export HF_NAMESPACE=YOUR_HF_USERNAME
 export HF_TOKEN=your_huggingface_token
 export VISIBILITY_FLAG=
-bash scripts/training/publish_h100_release.sh
+bash scripts/training/publish_a100_release.sh
 ```
 
 If you want private repos through the wrapper, set:
@@ -517,7 +519,7 @@ Do this when:
 - Free-tier Studios currently have restart limits, so checkpoint often.
 - Keep your first video short enough that one failed run does not waste most of a session.
 - If a T4 keeps failing, move to L4 before changing many parameters at once.
-- On H100, do not jump straight to multi-minute clips with every heavy feature on. Prove the short clip first, then scale one dimension at a time.
+- On A100, do not jump straight to multi-minute clips with every heavy feature on. Prove the short clip first, then scale one dimension at a time.
 
 ## Recommended Test Plan
 
