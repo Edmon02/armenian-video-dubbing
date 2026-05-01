@@ -1,0 +1,102 @@
+# Lightning.ai H100 80GB advanced profile.
+# This profile aims for best practical quality on a single H100 while keeping
+# enough safety margins for full-stack testing and longer clips.
+
+project:
+  device: "cuda"
+  dtype: "bfloat16"
+
+asr:
+  backend: "whisper"
+  whisper:
+    model: "large-v3"
+    model_path: "models/asr/whisper-large-v3-armenian"
+    language: "hy"
+    task: "transcribe"
+    compute_type: "float16"
+    batch_size: 16
+    chunk_length_s: 30
+    beam_size: 5
+    vad_filter: true
+    word_timestamps: true
+
+translation:
+  model: "facebook/seamless-m4t-v2-large"
+  model_path: "models/translation/seamless-m4t-v2-large"
+  dtype: "bfloat16"
+  max_length: 384
+  num_beams: 4
+
+tts:
+  backend: "fish-speech"
+  fish_speech:
+    sample_rate: 44100
+    max_new_tokens: 2048
+    top_p: 0.75
+    temperature: 0.65
+    repetition_penalty: 1.15
+    emotion_tags: true
+    reference_audio_seconds: 10
+    chunk_length: 220
+
+lipsync:
+  enabled: true
+  batch_size: 8
+  face_det_batch_size: 4
+  use_float16: true
+  face_enhancement: true
+
+audio:
+  sample_rate: 44100
+  loudness_target: -14.0
+  demucs:
+    enabled: true
+    segment: 7.8
+    overlap: 0.25
+    shifts: 1
+
+video:
+  output_crf: 18
+  output_preset: "medium"
+  output_audio_bitrate: "192k"
+
+timing:
+  max_stretch_ratio: 1.25
+  min_compress_ratio: 0.8
+  method: "rubberband"
+
+training:
+  asr:
+    epochs: 3
+    learning_rate: 8.0e-5
+    warmup_steps: 100
+    batch_size: 8
+    eval_batch_size: 8
+    gradient_accumulation: 4
+    lora_r: 32
+    lora_alpha: 64
+    lora_dropout: 0.05
+    eval_steps: 100
+    save_steps: 200
+    fp16: false
+    dataloader_workers: 4
+  tts:
+    epochs: 2
+    learning_rate: 3.0e-5
+    warmup_steps: 100
+    batch_size: 2
+    gradient_accumulation: 8
+    lora_r: 32
+    lora_alpha: 64
+    lora_dropout: 0.05
+    eval_steps: 50
+    save_steps: 100
+    fp16: false
+
+inference:
+  batch_video_max_concurrent: 1
+  gpu_memory_fraction: 0.92
+  enable_quantization: false
+  quantization_bits: 4
+  unload_models_after_stage: false
+  max_input_video_sec: 180
