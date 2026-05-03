@@ -27,26 +27,25 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import yaml
 from loguru import logger
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from transformers import (
     AutoFeatureExtractor,
     AutoTokenizer,
+    BitsAndBytesConfig,
     WhisperForConditionalGeneration,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
 )
-from peft import get_peft_model, LoraConfig, TaskType
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.utils.logger import setup_logger
 from src.utils.config import load_config
+from src.utils.logger import setup_logger
 from src.utils.helpers import free_gpu_memory, timer
 from src.training_utils import (
     AudioPreprocessor,
-    DataCollatorASRWithPadding,
     MetricsComputer,
     CheckpointManager,
     TrainingProgressTracker,
@@ -107,6 +106,37 @@ class ASRDatasetLoader:
         return dataset
 
 
+def log_dataset_diagnostics(dataset_type: str, args, train_entries: list[dict], eval_entries: list[dict]) -> None:
+    """Emit actionable diagnostics when dataset loading returns no usable samples."""
+    if dataset_type == "common_voice":
+        cv_dir = Path(args.cv_dir)
+        logger.error("Common Voice dataset directory not ready: {}", cv_dir)
+        if not cv_dir.exists():
+            logger.error("Directory does not exist")
+        else:
+            expected = [cv_dir / "train.jsonl", cv_dir / "validation.jsonl"]
+            missing = [str(path) for path in expected if not path.exists()]
+            if missing:
+                logger.error("Missing manifest files: {}", ", ".join(missing))
+
+        logger.error(
+            "Prepare dataset first, for example: python3 scripts/data_collection/download_cv_tiny.py "
+            "--output-dir data/common_voice --max-train 2000 --max-val 200"
+        )
+        logger.error("Then rerun with --cv-dir data/common_voice/manifests")
+        return
+
+    if dataset_type == "youtube":
+        yt_dir = Path(args.yt_dir)
+        logger.error("YouTube quality bucket directory not ready: {}", yt_dir)
+        logger.error("Expected at least gold/silver manifests for training and evaluation")
+        return
+
+    splits_dir = Path(args.splits_dir)
+    logger.error("Merged split directory not ready: {}", splits_dir)
+    logger.error("Expected train.jsonl and val.jsonl in the merged splits directory")
+
+
 # ============================================================================
 # Model setup
 # ============================================================================
@@ -119,7 +149,6 @@ def setup_whisper_lora(
     if lora_config is None:
         lora_config = {}
 
-    # Normalize keys: colab profile uses lora_r, standard uses r
     lora_r = lora_config.get("r", lora_config.get("lora_r", 32))
     lora_alpha = lora_config.get("lora_alpha", 64)
     lora_dropout = lora_config.get("lora_dropout", 0.05)
@@ -127,12 +156,23 @@ def setup_whisper_lora(
     lora_target = lora_config.get("target_modules", ["q_proj", "v_proj"])
 
     logger.info("Loading {} model...", model_id)
+    quantization_config = BitsAndBytesConfig(load_in_8bit=True)
     model = WhisperForConditionalGeneration.from_pretrained(
         model_id,
         torch_dtype=torch.float16,
         device_map="auto",
-        load_in_8bit=True,  # 8-bit quantization for memory efficiency
+        quantization_config=quantization_config,
     )
+    model.config.use_cache = False
+
+    model = prepare_model_for_kbit_training(model)
+    if hasattr(model, "enable_input_require_grads"):
+        model.enable_input_require_grads()
+    if hasattr(model, "gradient_checkpointing_enable"):
+        try:
+            model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        except TypeError:
+            model.gradient_checkpointing_enable()
 
     # Freeze base model
     for param in model.parameters():
@@ -141,7 +181,6 @@ def setup_whisper_lora(
     # Add LoRA adapter
     logger.info("Adding LoRA adapter: r={}, alpha={}", lora_r, lora_alpha)
     peft_config = LoraConfig(
-        task_type=TaskType.SEQ_2_SEQ_LM,
         r=lora_r,
         lora_alpha=lora_alpha,
         lora_dropout=lora_dropout,
@@ -168,6 +207,7 @@ def preprocess_function(
     feature_extractor,
     tokenizer,
     sample_rate: int = 16000,
+    max_label_length: int = 448,
 ) -> dict:
     """Preprocess audio + text."""
     audio_paths = examples["audio_path"]
@@ -192,7 +232,7 @@ def preprocess_function(
     )
 
     # Tokenize text
-    input_ids = tokenizer(texts, max_length=512, truncation=True).input_ids
+    input_ids = tokenizer(texts, max_length=max_label_length, truncation=True).input_ids
 
     return {
         "input_features": inputs.input_features,
@@ -208,11 +248,23 @@ def preprocess_function(
 def compute_metrics(pred, feature_extractor, tokenizer):
     """Compute WER metric during training."""
     predictions = pred.predictions
-    label_ids = pred.label_ids
+    label_ids = np.array(pred.label_ids, copy=True)
 
-    # Generate predictions
-    pred_ids = np.argmax(predictions, axis=-1)
+    if isinstance(predictions, (tuple, list)):
+        predictions = predictions[0]
+
+    predictions = np.asarray(predictions)
+    if predictions.ndim == 3:
+        pred_ids = np.argmax(predictions, axis=-1)
+    else:
+        pred_ids = predictions
+
+    pred_ids = np.array(pred_ids, copy=False)
+    if pred_ids.ndim == 1:
+        pred_ids = pred_ids[None, :]
+
     label_ids[label_ids == -100] = tokenizer.pad_token_id
+    pred_ids[pred_ids == -100] = tokenizer.pad_token_id
 
     pred_str = tokenizer.batch_decode(pred_ids, skip_special_tokens=True)
     label_str = tokenizer.batch_decode(label_ids, skip_special_tokens=True)
@@ -235,15 +287,14 @@ def train_asr(
     tokenizer,
     training_args: dict,
     output_dir: Path,
+    generation_max_length: int,
+    generation_num_beams: int,
 ):
     """Train ASR model."""
     logger.info("Starting ASR training...")
     logger.info("Train samples: {}", len(train_dataset))
     logger.info("Eval samples: {}", len(eval_dataset))
 
-    # Data collator for already-preprocessed features.
-    # The dataset was already .map()-ed to contain input_features and labels,
-    # so we just need to pad labels (features are fixed-size from Whisper).
     from dataclasses import dataclass
 
     @dataclass
@@ -254,11 +305,14 @@ def train_asr(
             import torch as _torch
 
             input_features = _torch.tensor(
-                [s["input_features"] for s in batch], dtype=_torch.float32
+                [sample["input_features"] for sample in batch], dtype=_torch.float32
             )
-            label_lists = [s["labels"] for s in batch]
-            max_len = max(len(l) for l in label_lists)
-            padded = [l + [self.pad_token_id] * (max_len - len(l)) for l in label_lists]
+            label_lists = [sample["labels"] for sample in batch]
+            max_len = max(len(labels) for labels in label_lists)
+            padded = [
+                labels + [self.pad_token_id] * (max_len - len(labels))
+                for labels in label_lists
+            ]
             labels = _torch.tensor(padded, dtype=_torch.long)
             return {"input_features": input_features, "labels": labels}
 
@@ -290,6 +344,9 @@ def train_asr(
             dataloader_num_workers=training_args.get("dataloader_workers", 2),
             remove_unused_columns=False,
             label_names=["labels"],
+            predict_with_generate=True,
+            generation_max_length=generation_max_length,
+            generation_num_beams=generation_num_beams,
         ),
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
@@ -302,8 +359,11 @@ def train_asr(
         train_result = trainer.train()
 
     # Save final model
-    model.save_pretrained(str(output_dir / "final_model"))
-    logger.info("Saved final model to {}", output_dir / "final_model")
+    final_model_dir = output_dir / "final_model"
+    model.save_pretrained(str(final_model_dir))
+    feature_extractor.save_pretrained(str(final_model_dir))
+    tokenizer.save_pretrained(str(final_model_dir))
+    logger.info("Saved final model bundle to {}", final_model_dir)
 
     # Results
     metrics = {
@@ -347,6 +407,7 @@ def main():
 
     args = parser.parse_args()
     setup_logger()
+    os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
     # Load config
     config = load_config(config_path=args.config, override_path=args.config_override)
@@ -362,6 +423,8 @@ def main():
         model_id=f"openai/whisper-{asr_config['whisper']['model']}",
         lora_config=training_config.copy(),
     )
+    max_label_length = int(getattr(model.config, "max_target_positions", 448))
+    logger.info("Using max label length {} for Whisper targets", max_label_length)
 
     # Load processors
     feature_extractor = AutoFeatureExtractor.from_pretrained(
@@ -370,8 +433,12 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(
         f"openai/whisper-{asr_config['whisper']['model']}"
     )
-    tokenizer.language = "Armenian"
-    tokenizer.task = "transcribe"
+    whisper_language = asr_config["whisper"].get("language", "hy")
+    whisper_task = asr_config["whisper"].get("task", "transcribe")
+    tokenizer.language = whisper_language
+    tokenizer.task = whisper_task
+    model.generation_config.language = whisper_language
+    model.generation_config.task = whisper_task
 
     # Load datasets
     loader = ASRDatasetLoader(sample_rate=16000)
@@ -400,7 +467,12 @@ def main():
     eval_dataset = loader.create_hf_dataset(eval_entries)
 
     if train_dataset is None or eval_dataset is None:
-        logger.error("Failed to load datasets")
+        log_dataset_diagnostics(args.dataset_type, args, train_entries, eval_entries)
+        logger.error(
+            "Failed to load datasets (train_samples={}, eval_samples={})",
+            len(train_entries),
+            len(eval_entries),
+        )
         sys.exit(1)
 
     # Preprocess
@@ -411,6 +483,7 @@ def main():
             feature_extractor,
             tokenizer,
             sample_rate=16000,
+            max_label_length=max_label_length,
         )
 
     train_dataset = train_dataset.map(
@@ -435,6 +508,8 @@ def main():
         tokenizer=tokenizer,
         training_args=training_config,
         output_dir=output_dir,
+        generation_max_length=max_label_length,
+        generation_num_beams=int(asr_config["whisper"].get("beam_size", 1)),
     )
 
     logger.info("ASR training complete: {}", output_dir)

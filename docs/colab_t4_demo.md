@@ -97,9 +97,9 @@ If you want the Gradio UI in Colab:
 
 For the training smoke tests below, `input_short.mp4` is not used directly. Those scripts expect dataset manifests and audio-text pairs, not a single demo video clip.
 
-### Download Tiny Common Voice Subset
+### Download Tiny Armenian ASR Subset
 
-Before training, download a small slice of Common Voice hy-AM (80 train + 20 validation):
+Before training, download a small Armenian ASR dataset slice (80 train + 20 validation):
 
 ```bash
 !python scripts/data_collection/download_cv_tiny.py \
@@ -108,7 +108,11 @@ Before training, download a small slice of Common Voice hy-AM (80 train + 20 val
   --max-val 20
 ```
 
-This uses HuggingFace streaming and only downloads the samples you need (~2-3 minutes).
+Behavior:
+
+- If you provide `--mdc-dataset-id` and have `MDC_API_KEY`, the script pulls official Common Voice from Mozilla Data Collective.
+- Otherwise it falls back to FLEURS Armenian and still writes compatible manifests to `data/common_voice/manifests`.
+- This keeps the Colab smoke-test training command unchanged even though Common Voice is no longer hosted on Hugging Face.
 
 ### ASR LoRA Smoke Test
 

@@ -98,12 +98,13 @@ This is the fastest way to validate the full pipeline behavior.
 
 ### 2. ASR Seed Training
 
-Use Mozilla Common Voice Armenian as the first training source.
+Use Mozilla Common Voice Armenian as the first training source when you have Mozilla Data Collective access.
 
 Why:
 
 - already supported by the repository
-- easy to download in tiny slices
+- best real seed corpus for Armenian ASR fine-tuning
+- official source still exists on Mozilla Data Collective
 - clean enough for LoRA smoke tests
 - low operational complexity on a single GPU
 
@@ -113,8 +114,15 @@ Existing helper:
 python scripts/data_collection/download_cv_tiny.py \
   --output-dir data/common_voice \
   --max-train 80 \
-  --max-val 20
+  --max-val 20 \
+  --mdc-dataset-id YOUR_MDC_DATASET_ID
 ```
+
+Notes:
+
+- Common Voice Armenian still exists as Mozilla Data Collective's Common Voice Scripted Speech 25.0 - Armenian dataset.
+- Programmatic download now requires accepting the dataset terms in the Mozilla web UI plus setting `MDC_API_KEY`.
+- If you do not provide MDC access, this helper now falls back to FLEURS Armenian and still writes manifests under `data/common_voice/manifests` so the smoke test can run.
 
 ### 3. Clean Held-Out ASR Benchmark
 
@@ -347,14 +355,17 @@ For A100 bring-up, still start with a short clip. After that succeeds, move to l
 
 ## 9. Download Training And Evaluation Data
 
-Tiny Common Voice for ASR smoke training:
+Tiny Armenian ASR smoke-train dataset:
 
 ```bash
 python3 scripts/data_collection/download_cv_tiny.py \
   --output-dir data/common_voice \
   --max-train 80 \
-  --max-val 20
+  --max-val 20 \
+  --mdc-dataset-id YOUR_MDC_DATASET_ID
 ```
+
+If MDC is not configured yet, the same command falls back to FLEURS Armenian and keeps the rest of the training commands unchanged.
 
 FLEURS Armenian for cleaner evaluation:
 
