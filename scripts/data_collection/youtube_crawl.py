@@ -58,44 +58,44 @@ DEFAULT_CRAWL_CONFIG = {
             # News & Public affairs
             "հայկական նորություններ",  # Armenian news
             "Հանրային հեռուստատեսություն",  # Public television
-            "Ազusage Ալիկdelays Արմdelays",
+            "Ազատություն Ալիք Մեդիա Արմենիա",
             "1TV Armenia",
             "Shant TV",
             "Armenia TV նորություններ",
-            "Հայdelays տdelays",
+            "Հայկական հեռուստատեսություն",
             # Podcasts & Talk shows
-            "հայereni podcast",
+            "հայերենի փոդքասթ",
             "Armenian podcast",
-            "հdelays հdelays",
-            "հdelays",
-            "հdelays ուdelays",
+            "հայերեն հարցազրույց",
+            "հայերեն զրույց",
+            "հարց ու պատասխան",
             # Education & Lectures
             "Armenian lecture university",
             "Yerevan State University lecture",
             "AUA lecture Armenian",
             "Armenian TED talk",
-            "գdelays delays ուdelays",
+            "գիտություն և տեխնոլոգիա",
             # Audiobooks & Literature
-            "հdelays աdelays delays",
+            "հայերեն աուդիոգիրք",
             "Armenian audiobook",
             "Hovhannes Tumanyan",
             "William Saroyan Armenian",
             # Religion & Sermons
-            "Hayastanyayc Yegegheci qarozdelays",
+            "Հայաստանյայց եկեղեցի քարոզ",
             "Armenian church sermon",
             "Armenian liturgy",
             # Vlogs & Lifestyle
             "Armenian vlogger",
             "Yerevan vlog",
-            "հdelays vlog",
+            "հայերեն vlog",
             "Armenia travel Armenian language",
             # History & Documentary
             "Armenian history documentary",
-            "հdelays delays delays ments",
-            "Հdelays ographies",
+            "հայերեն վավերագրական ֆիլմ",
+            "Հայոց պատմություն",
             # Cooking & Culture
             "Armenian cooking recipe",
-            "հdelays delaysdelays",
+            "հայկական խոհանոց",
             # Technology & Science
             "technology Armenian",
             "IT Armenia Armenian",
@@ -108,7 +108,7 @@ DEFAULT_CRAWL_CONFIG = {
             "Armenian sport news",
             # Children
             "Armenian children story",
-            "հdelays delaysdelays delays delays",
+            "հայերեն մանկական պատմություն",
             # Politics & Analysis
             "Armenian political analysis",
             "Armenian parliament session",

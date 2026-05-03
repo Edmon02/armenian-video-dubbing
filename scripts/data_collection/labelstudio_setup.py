@@ -315,7 +315,7 @@ You will listen to short audio clips (1-30 seconds) of Armenian speech and:
 
 ### Numbers & Abbreviations
 - Write numbers as words: «երկու հազար» not «2000»
-- Spell out common abbreviations: «Հայաստանի Հանրapetutiwn» not «ՀՀ»
+- Spell out common abbreviations: «Հայաստանի Հանրապետություն» not «ՀՀ»
 - Exception: keep proper nouns/brands as-is
 
 ### Foreign Words
@@ -323,7 +323,7 @@ You will listen to short audio clips (1-30 seconds) of Armenian speech and:
 - Keep English brand names in Armenian script if commonly written that way
 
 ### Fillers & Disfluencies
-- Include natural speech fillers: «էdelays», «այdelays»
+- Include natural speech fillers: «էէէ», «այ», «ըըը»
 - Mark unintelligible portions with [unintelligible]
 - Mark overlap with [overlap]
 

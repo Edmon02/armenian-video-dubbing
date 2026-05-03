@@ -93,7 +93,7 @@ class LipSyncDataProcessor:
 
         queries = [
             "Armenian news anchor",
-            "հdelays",
+            "հայերեն հարցազրույց",
             "Armenia interview face",
             "Armenian vlog talking",
             "Armenian lecture face",

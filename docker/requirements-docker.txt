@@ -7,6 +7,7 @@ faster-whisper==1.1.0
 nemo_toolkit[asr]==2.1.0
 transformers==4.48.1
 sentencepiece==0.2.0
+gTTS==2.5.4
 demucs==4.0.1
 librosa==0.10.2
 soundfile==0.12.1

@@ -29,9 +29,12 @@ from src.utils.logger import setup_logger
 class GradioDubbingApp:
     """Gradio interface for dubbing pipeline."""
 
-    def __init__(self):
+    def __init__(self, config_path: Optional[str] = None, config_override_path: Optional[str] = None):
         setup_logger()
-        self.pipeline = DubbingPipeline()
+        self.pipeline = DubbingPipeline(
+            config_path=config_path,
+            config_override_path=config_override_path,
+        )
         self.temp_dir = Path(tempfile.gettempdir()) / "armtts_gradio"
         self.temp_dir.mkdir(exist_ok=True)
 
@@ -210,10 +213,15 @@ def main():
     parser.add_argument("--port", type=int, default=7860)
     parser.add_argument("--share", action="store_true")
     parser.add_argument("--server-name", type=str, default="0.0.0.0")
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--config-override", type=str, default=None)
 
     args = parser.parse_args()
 
-    app_builder = GradioDubbingApp()
+    app_builder = GradioDubbingApp(
+        config_path=args.config,
+        config_override_path=args.config_override,
+    )
     demo = app_builder.build_app()
 
     demo.launch(

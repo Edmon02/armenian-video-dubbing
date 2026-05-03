@@ -22,6 +22,22 @@ import torch
 from loguru import logger
 
 
+def _resolve_torch_dtype(dtype_name: str, device: str) -> torch.dtype:
+    """Resolve a string dtype name into a torch dtype compatible with the device."""
+    if device == "cpu":
+        return torch.float32
+
+    dtype_map = {
+        "float16": torch.float16,
+        "fp16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "bf16": torch.bfloat16,
+        "float32": torch.float32,
+        "fp32": torch.float32,
+    }
+    return dtype_map.get(dtype_name.lower(), torch.float16)
+
+
 # ============================================================================
 # ASR Inference
 # ============================================================================
@@ -36,14 +52,24 @@ class ASRInference:
     def __init__(
         self,
         model_path: Path = Path("models/asr/whisper-hy-full"),
+        model_id: str = "openai/whisper-large-v3",
         device: str = "cuda",
         use_fp16: bool = True,
         quantize_bits: int = 0,
+        language: str = "hy",
+        task: str = "transcribe",
+        chunk_length_s: int = 30,
+        batch_size: int = 8,
     ):
         self.model_path = Path(model_path)
+        self.model_id = model_id
         self.device = device
         self.use_fp16 = use_fp16
         self.quantize_bits = quantize_bits  # 0=off, 4=int4, 8=int8
+        self.language = language
+        self.task = task
+        self.chunk_length_s = chunk_length_s
+        self.batch_size = batch_size
         self.model = None
         self.processor = None
         self._pipe = None  # faster-whisper / HF pipeline
@@ -62,7 +88,8 @@ class ASRInference:
                 pipeline as hf_pipeline,
             )
 
-            base_model_id = "openai/whisper-large-v3"
+            base_model_id = self.model_id
+            use_accelerate = False
 
             # Build quantization config if requested
             quant_config = None
@@ -75,6 +102,7 @@ class ASRInference:
                         bnb_4bit_compute_dtype=torch.float16,
                         bnb_4bit_quant_type="nf4",
                     )
+                    use_accelerate = True
                     logger.info("Using {}-bit quantization", self.quantize_bits)
                 except ImportError:
                     logger.warning("bitsandbytes not installed; falling back to fp16")
@@ -86,8 +114,16 @@ class ASRInference:
             if quant_config:
                 model_kwargs["quantization_config"] = quant_config
                 model_kwargs["device_map"] = "auto"
-            else:
-                model_kwargs["device_map"] = self.device
+
+            pipeline_kwargs = {
+                "task": "automatic-speech-recognition",
+                "torch_dtype": torch.float16 if self.use_fp16 else torch.float32,
+            }
+            if not use_accelerate:
+                if self.device == "cuda":
+                    pipeline_kwargs["device"] = 0
+                elif self.device == "cpu":
+                    pipeline_kwargs["device"] = -1
 
             # Try loading fine-tuned checkpoint first, fall back to base
             model_id = base_model_id
@@ -103,36 +139,36 @@ class ASRInference:
                 from peft import PeftModel
                 model = PeftModel.from_pretrained(model, str(self.model_path))
                 model = model.merge_and_unload()
+                if not use_accelerate and self.device != "cpu":
+                    model = model.to(self.device)
                 model.eval()
                 self.model = model
                 self.processor = WhisperProcessor.from_pretrained(base_model_id)
                 self._pipe = hf_pipeline(
-                    "automatic-speech-recognition",
                     model=self.model,
                     tokenizer=self.processor.tokenizer,
                     feature_extractor=self.processor.feature_extractor,
-                    torch_dtype=torch.float16 if self.use_fp16 else torch.float32,
-                    device=self.device,
+                    **pipeline_kwargs,
                 )
                 logger.info("ASR model loaded with LoRA adapter")
                 return
             else:
-                logger.info("Fine-tuned model not found, using base Whisper large-v3")
+                logger.info("Fine-tuned model not found, using base {}", base_model_id)
 
             self.processor = WhisperProcessor.from_pretrained(model_id)
             self.model = WhisperForConditionalGeneration.from_pretrained(
                 model_id,
                 **model_kwargs,
             )
+            if not use_accelerate and self.device != "cpu":
+                self.model = self.model.to(self.device)
             self.model.eval()
 
             self._pipe = hf_pipeline(
-                "automatic-speech-recognition",
                 model=self.model,
                 tokenizer=self.processor.tokenizer,
                 feature_extractor=self.processor.feature_extractor,
-                torch_dtype=torch.float16 if self.use_fp16 else torch.float32,
-                device=self.device,
+                **pipeline_kwargs,
             )
 
             logger.info("ASR model loaded ({})", model_id)
@@ -141,21 +177,33 @@ class ASRInference:
             logger.error("Failed to load ASR model: {}", e)
             raise
 
-    def transcribe(self, audio_path: str) -> dict:
-        """Transcribe audio file and return segment-level results with timestamps."""
+    def transcribe(self, audio_path: str, language: str = None) -> dict:
+        """Transcribe audio file and return segment-level results with timestamps.
+
+        Args:
+            audio_path: Path to audio file.
+            language: Override language for transcription.  Accepts ISO 639-1
+                (e.g. "en", "hy"), ISO 639-3 (e.g. "eng", "hye"), or full
+                names ("english", "armenian").  Falls back to the instance
+                default (self.language) if not provided.
+        """
         if self.model is None:
             self.load()
+
+        # Resolve language to a form Whisper understands
+        lang = language or self.language
+        whisper_lang = self._resolve_whisper_language(lang)
 
         try:
             result = self._pipe(
                 audio_path,
                 generate_kwargs={
-                    "language": "armenian",
-                    "task": "transcribe",
+                    "language": whisper_lang,
+                    "task": self.task,
                 },
                 return_timestamps=True,
-                chunk_length_s=30,
-                batch_size=8,
+                chunk_length_s=self.chunk_length_s,
+                batch_size=self.batch_size,
             )
 
             # Build segments from chunks
@@ -179,9 +227,22 @@ class ASRInference:
             import librosa
             duration = librosa.get_duration(path=audio_path)
 
+            full_text = result["text"].strip()
+
+            # Filter out hallucinated segments (Whisper hallucinates on silence)
+            if self._is_hallucinated(full_text):
+                logger.warning("ASR output looks hallucinated, replacing with empty")
+                full_text = ""
+                segments = [{"text": "", "start": 0.0, "end": duration}]
+            else:
+                # Also filter individual segments
+                for seg in segments:
+                    if self._is_hallucinated(seg["text"]):
+                        seg["text"] = ""
+
             return {
-                "text": result["text"].strip(),
-                "language": "hy",
+                "text": full_text,
+                "language": whisper_lang,
                 "segments": segments,
                 "duration_sec": duration,
             }
@@ -217,6 +278,44 @@ class ASRInference:
             torch.cuda.empty_cache()
         gc.collect()
 
+    @staticmethod
+    def _resolve_whisper_language(lang: str) -> str:
+        """Map various language code formats to Whisper-compatible names."""
+        _MAP = {
+            # ISO 639-3 → Whisper
+            "eng": "english",
+            "hye": "armenian",
+            "hyw": "armenian",
+            "rus": "russian",
+            "fra": "french",
+            "deu": "german",
+            "spa": "spanish",
+            # ISO 639-1 → Whisper
+            "en": "english",
+            "hy": "armenian",
+            "ru": "russian",
+            "fr": "french",
+            "de": "german",
+            "es": "spanish",
+            # Already full names
+            "english": "english",
+            "armenian": "armenian",
+        }
+        return _MAP.get(lang.lower(), lang)
+
+    @staticmethod
+    def _is_hallucinated(text: str) -> bool:
+        """Detect Whisper hallucination (repetitive garbage on silence)."""
+        if not text or len(text) < 10:
+            return True
+        # Split into tokens and check repetition ratio
+        tokens = text.replace(",", " ").split()
+        if len(tokens) < 3:
+            return False
+        unique_ratio = len(set(tokens)) / len(tokens)
+        # If >80% of tokens are identical, it's hallucination
+        return unique_ratio < 0.2
+
 
 # ============================================================================
 # Translation Inference
@@ -233,9 +332,15 @@ class TranslationInference:
         self,
         model_id: str = "facebook/seamless-m4t-v2-large",
         device: str = "cuda",
+        dtype: str = "float16",
+        num_beams: int = 5,
+        max_new_tokens: int = 512,
     ):
         self.model_id = model_id
         self.device = device
+        self.dtype = dtype
+        self.num_beams = num_beams
+        self.max_new_tokens = max_new_tokens
         self.model = None
         self.processor = None
         self.tokenizer = None
@@ -250,10 +355,12 @@ class TranslationInference:
         try:
             from transformers import AutoProcessor, SeamlessM4Tv2ForTextToText
 
+            torch_dtype = _resolve_torch_dtype(self.dtype, self.device)
+
             self.processor = AutoProcessor.from_pretrained(self.model_id)
             self.model = SeamlessM4Tv2ForTextToText.from_pretrained(
                 self.model_id,
-                torch_dtype=torch.float16,
+                torch_dtype=torch_dtype,
                 low_cpu_mem_usage=True,
             ).to(self.device)
             self.model.eval()
@@ -297,8 +404,8 @@ class TranslationInference:
                 output_tokens = self.model.generate(
                     **inputs,
                     tgt_lang=tgt_lang,
-                    num_beams=5,
-                    max_new_tokens=512,
+                    num_beams=self.num_beams,
+                    max_new_tokens=self.max_new_tokens,
                 )
 
             translated_text = self.processor.batch_decode(
@@ -334,10 +441,20 @@ class TranslationInference:
         """
         translated_segments = []
         for seg in segments:
-            result = self.translate(seg["text"], src_lang, tgt_lang)
+            text = seg.get("text", "").strip()
+            if not text:
+                # Preserve timing for empty/silent segments
+                translated_segments.append({
+                    "text": "",
+                    "src_text": "",
+                    "start": seg["start"],
+                    "end": seg["end"],
+                })
+                continue
+            result = self.translate(text, src_lang, tgt_lang)
             translated_segments.append({
                 "text": result["tgt_text"],
-                "src_text": seg["text"],
+                "src_text": text,
                 "start": seg["start"],
                 "end": seg["end"],
             })
@@ -371,10 +488,12 @@ class TTSInference:
         model_path: Path = Path("models/tts/fish-speech-hy"),
         device: str = "cuda",
         sample_rate: int = 44100,
+        preferred_backend: str = "auto",
     ):
         self.model_path = Path(model_path)
         self.device = device
         self.sample_rate = sample_rate
+        self.preferred_backend = preferred_backend
         self.backend = None  # "fish-speech" or "edge-tts"
         self.model = None
         self.encoder = None
@@ -384,34 +503,43 @@ class TTSInference:
         if self.backend is not None:
             return
 
-        # Try Fish-Speech first
+        backend_order = []
+        if self.preferred_backend and self.preferred_backend != "auto":
+            backend_order.append(self.preferred_backend)
+        backend_order.extend(
+            backend for backend in ["fish-speech", "edge-tts", "gtts"]
+            if backend not in backend_order
+        )
+
         fish_dir = Path("externals/fish-speech")
-        if fish_dir.exists() and (fish_dir / "fish_speech").exists():
-            try:
-                self._load_fish_speech()
-                self.backend = "fish-speech"
-                logger.info("TTS backend: Fish-Speech S2 Pro")
-                return
-            except Exception as e:
-                logger.warning("Fish-Speech failed to load: {}, falling back to edge-tts", e)
+        for backend in backend_order:
+            if backend == "fish-speech":
+                if fish_dir.exists() and (fish_dir / "fish_speech").exists():
+                    try:
+                        self._load_fish_speech()
+                        self.backend = "fish-speech"
+                        logger.info("TTS backend: Fish-Speech S2 Pro")
+                        return
+                    except Exception as e:
+                        logger.warning("Fish-Speech failed to load: {}", e)
 
-        # Fall back to edge-tts (always available via pip)
-        try:
-            import edge_tts  # noqa: F401
-            self.backend = "edge-tts"
-            logger.info("TTS backend: edge-tts (Microsoft)")
-            return
-        except ImportError:
-            pass
+            if backend == "edge-tts":
+                try:
+                    import edge_tts  # noqa: F401
+                    self.backend = "edge-tts"
+                    logger.info("TTS backend: edge-tts (Microsoft)")
+                    return
+                except ImportError:
+                    continue
 
-        # Last resort: gTTS
-        try:
-            import gtts  # noqa: F401
-            self.backend = "gtts"
-            logger.info("TTS backend: gTTS (Google)")
-            return
-        except ImportError:
-            pass
+            if backend == "gtts":
+                try:
+                    import gtts  # noqa: F401
+                    self.backend = "gtts"
+                    logger.info("TTS backend: gTTS (Google)")
+                    return
+                except ImportError:
+                    continue
 
         raise RuntimeError(
             "No TTS backend available. Install one of: "
@@ -471,7 +599,11 @@ class TTSInference:
         if self.backend == "fish-speech":
             return self._synthesize_fish_speech(text, reference_audio_path, emotion, language)
         elif self.backend == "edge-tts":
-            return self._synthesize_edge_tts(text, emotion, language)
+            try:
+                return self._synthesize_edge_tts(text, emotion, language)
+            except Exception as e:
+                logger.warning("edge-tts synthesis failed: {}, falling back to gTTS", e)
+                return self._synthesize_gtts(text, language)
         elif self.backend == "gtts":
             return self._synthesize_gtts(text, language)
         else:
@@ -539,57 +671,77 @@ class TTSInference:
         except ImportError:
             raise RuntimeError("edge-tts not installed. Run: pip install edge-tts")
 
-        # Voice selection based on language
-        voice_map = {
-            "hy": "hy-AM-AnahitNeural",  # Armenian female
-            "hy-male": "hy-AM-HaykNeural",  # Armenian male
-            "en": "en-US-JennyNeural",
-            "ru": "ru-RU-SvetlanaNeural",
-        }
+        normalized_language = {
+            "hye": "hy",
+            "hyw": "hy",
+        }.get(language, language)
 
-        voice = voice_map.get(language, voice_map.get("hy", "hy-AM-AnahitNeural"))
+        voice_candidates = {
+            "hy": [
+                "hy-AM-AnahitNeural",
+                "hy-AM-HaykNeural",
+                "en-US-AvaMultilingualNeural",
+                "en-US-AndrewMultilingualNeural",
+            ],
+            "en": ["en-US-JennyNeural", "en-US-GuyNeural"],
+            "ru": ["ru-RU-SvetlanaNeural", "ru-RU-DmitryNeural"],
+        }
+        candidate_voices = voice_candidates.get(normalized_language, voice_candidates.get("hy", []))
+        if not candidate_voices:
+            candidate_voices = ["en-US-AvaMultilingualNeural"]
 
         # Map emotion to SSML prosody parameters
         emotion_prosody = {
-            "neutral": {"rate": "0%", "pitch": "0%", "volume": "0%"},
-            "happy":   {"rate": "+10%", "pitch": "+5%", "volume": "+5%"},
-            "sad":     {"rate": "-15%", "pitch": "-5%", "volume": "-10%"},
-            "angry":   {"rate": "+5%", "pitch": "+10%", "volume": "+15%"},
-            "excited": {"rate": "+15%", "pitch": "+10%", "volume": "+10%"},
-            "calm":    {"rate": "-10%", "pitch": "-3%", "volume": "-5%"},
+            "neutral": {"rate": "+0%", "pitch": "+0Hz", "volume": "+0%"},
+            "happy":   {"rate": "+10%", "pitch": "+5Hz", "volume": "+5%"},
+            "sad":     {"rate": "-15%", "pitch": "-5Hz", "volume": "-10%"},
+            "angry":   {"rate": "+5%", "pitch": "+10Hz", "volume": "+15%"},
+            "excited": {"rate": "+15%", "pitch": "+10Hz", "volume": "+10%"},
+            "calm":    {"rate": "-10%", "pitch": "-3Hz", "volume": "-5%"},
         }
         prosody = emotion_prosody.get(emotion, emotion_prosody["neutral"])
 
-        # Build SSML with prosody tags for emotion
-        ssml_text = (
-            f'<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" xml:lang="hy-AM">'
-            f'<voice name="{voice}">'
-            f'<prosody rate="{prosody["rate"]}" pitch="{prosody["pitch"]}" volume="{prosody["volume"]}">'
-            f'{text}'
-            f'</prosody></voice></speak>'
-        )
-
-        # edge-tts is async, run in event loop
-        async def _do_tts():
+        async def _do_tts(voice: str):
             with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
                 tmp_mp3 = f.name
 
-            communicate = edge_tts.Communicate(ssml_text, voice)
+            communicate = edge_tts.Communicate(
+                text=text,
+                voice=voice,
+                rate=prosody["rate"],
+                pitch=prosody["pitch"],
+                volume=prosody["volume"],
+            )
             await communicate.save(tmp_mp3)
             return tmp_mp3
 
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                # We're inside an async context (FastAPI), use nest_asyncio or thread
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as executor:
-                    future = executor.submit(asyncio.run, _do_tts())
-                    tmp_mp3 = future.result(timeout=60)
-            else:
-                tmp_mp3 = asyncio.run(_do_tts())
-        except RuntimeError:
-            tmp_mp3 = asyncio.run(_do_tts())
+        def _run_tts(voice: str) -> str:
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as executor:
+                        future = executor.submit(asyncio.run, _do_tts(voice))
+                        return future.result(timeout=60)
+                return asyncio.run(_do_tts(voice))
+            except RuntimeError:
+                return asyncio.run(_do_tts(voice))
+
+        last_error = None
+        selected_voice = candidate_voices[0]
+        tmp_mp3 = None
+        for voice in candidate_voices:
+            try:
+                tmp_mp3 = _run_tts(voice)
+                selected_voice = voice
+                logger.info("edge-tts synthesis succeeded with voice {}", voice)
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning("edge-tts voice {} failed: {}", voice, e)
+
+        if tmp_mp3 is None:
+            raise RuntimeError(f"edge-tts failed for all candidate voices: {last_error}")
 
         # Convert mp3 to wav and load
         tmp_wav = tmp_mp3.replace(".mp3", ".wav")
@@ -615,7 +767,7 @@ class TTSInference:
             "text": text,
             "emotion": emotion,
             "backend": "edge-tts",
-            "voice": voice,
+            "voice": selected_voice,
         }
 
     def _synthesize_gtts(self, text: str, language: str) -> dict:
@@ -853,8 +1005,9 @@ class LipSyncInference:
 class AudioPostProcessor:
     """Post-process dubbed audio: source separation, denoise, normalize, mix."""
 
-    def __init__(self, sample_rate: int = 44100):
+    def __init__(self, sample_rate: int = 44100, enable_source_separation: bool = True):
         self.sample_rate = sample_rate
+        self.enable_source_separation = enable_source_separation
         self.demucs = None
 
     def load_demucs(self):
@@ -876,6 +1029,9 @@ class AudioPostProcessor:
 
         Returns dict with keys: vocals, drums, bass, other
         """
+        if not self.enable_source_separation:
+            return {"vocals": audio, "accompaniment": np.zeros_like(audio)}
+
         self.load_demucs()
         if self.demucs is None:
             return {"vocals": audio, "accompaniment": np.zeros_like(audio)}

@@ -1,0 +1,91 @@
+# Google Colab T4 trial profile.
+# This override intentionally favors short-form reliability over full production quality.
+
+project:
+  device: "cuda"
+  dtype: "float16"
+
+asr:
+  backend: "whisper"
+  whisper:
+    model: "small"
+    model_path: "models/asr/whisper-small"
+    language: "hy"
+    task: "transcribe"
+    compute_type: "int8_float16"
+    batch_size: 4
+    chunk_length_s: 15
+
+translation:
+  model: "facebook/seamless-m4t-v2-large"
+  model_path: "models/translation/seamless-m4t-v2-large"
+  dtype: "float16"
+  max_length: 192
+  num_beams: 1
+
+tts:
+  backend: "edge-tts"
+  fish_speech:
+    reference_audio_seconds: 6
+    chunk_length: 120
+
+lipsync:
+  enabled: false
+  batch_size: 4
+  face_det_batch_size: 2
+  use_float16: true
+
+audio:
+  sample_rate: 24000
+  loudness_target: -16.0
+  demucs:
+    enabled: false
+    segment: 4.0
+    overlap: 0.1
+    shifts: 0
+
+video:
+  output_crf: 23
+  output_preset: "veryfast"
+  output_audio_bitrate: "128k"
+
+timing:
+  max_stretch_ratio: 1.18
+  min_compress_ratio: 0.85
+  method: "ffmpeg"
+
+training:
+  asr:
+    epochs: 1
+    learning_rate: 1.0e-4
+    warmup_steps: 10
+    batch_size: 2
+    eval_batch_size: 2
+    gradient_accumulation: 8
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.05
+    eval_steps: 25
+    save_steps: 50
+    fp16: true
+    dataloader_workers: 2
+  tts:
+    epochs: 1
+    learning_rate: 2.0e-5
+    warmup_steps: 10
+    batch_size: 1
+    gradient_accumulation: 16
+    lora_r: 8
+    lora_alpha: 16
+    lora_dropout: 0.05
+    eval_steps: 20
+    save_steps: 50
+    fp16: true
+
+inference:
+  batch_video_max_concurrent: 1
+  gpu_memory_fraction: 0.7
+  enable_quantization: true
+  quantization_bits: 4
+  unload_models_after_stage: true
+  max_input_video_sec: 20

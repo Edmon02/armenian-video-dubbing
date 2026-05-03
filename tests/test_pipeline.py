@@ -40,10 +40,10 @@ class TestASRInference:
         # Mock the pipeline so we don't download the model
         asr.model = MagicMock()
         asr._pipe = MagicMock(return_value={
-            "text": "Բարև ձdelays",
+            "text": "Բարև ձեզ",
             "chunks": [
                 {"text": "Բարև", "timestamp": (0.0, 1.0)},
-                {"text": "ձезды", "timestamp": (1.0, 2.0)},
+                {"text": "ձեզ", "timestamp": (1.0, 2.0)},
             ],
         })
 
@@ -82,7 +82,7 @@ class TestTranslationInference:
         t.model = MagicMock()
         t.processor = MagicMock()
         t.processor.return_value = {"input_ids": MagicMock(to=MagicMock(return_value=MagicMock()))}
-        t.processor.batch_decode = MagicMock(return_value=["Բարադdelays Աշխdelays"])
+        t.processor.batch_decode = MagicMock(return_value=["Բարև աշխարհ"])
         t.model.generate = MagicMock(return_value=MagicMock())
 
         segments = [
@@ -205,6 +205,32 @@ class TestDubbingPipeline:
 
         result = pipeline._align_and_stitch_segments(seg_audios, segments, total_duration=3.0)
         assert len(result) == int(3.0 * pipeline.sr)
+
+    def test_config_override_applies(self):
+        """Override config should affect runtime-friendly settings."""
+        from src.pipeline import DubbingPipeline
+
+        override = """
+inference:
+  max_input_video_sec: 12
+audio:
+  demucs:
+    enabled: false
+tts:
+  backend: edge-tts
+"""
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
+            f.write(override)
+            override_path = f.name
+
+        try:
+            pipeline = DubbingPipeline(config_override_path=override_path)
+            assert pipeline.max_input_video_sec == 12
+            assert pipeline.audio_processor.enable_source_separation is False
+            assert pipeline.tts.preferred_backend == "edge-tts"
+        finally:
+            os.unlink(override_path)
 
 
 # ============================================================================
