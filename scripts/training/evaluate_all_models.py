@@ -38,6 +38,12 @@ class ComprehensiveEvaluator:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.results = {}
 
+    @staticmethod
+    def _not_measured(stage: str, how: str) -> dict:
+        """Placeholder result: this suite has no real scorer for the stage yet."""
+        logger.warning("{}: not measured. {}", stage, how)
+        return {"status": "not_measured", "note": how}
+
     def evaluate_asr(self, test_manifest: Path, model_path: Path) -> dict:
         """Evaluate ASR model on test set."""
         logger.info("=" * 60)
@@ -51,93 +57,39 @@ class ComprehensiveEvaluator:
             return {}
 
         logger.info("Test set: {} samples", len(test_data))
-
-        # This would load the fine-tuned model and run inference
-        # For now, placeholder metrics
-        metrics = {
-            "dataset": str(test_manifest),
-            "num_samples": len(test_data),
-            "wer": 0.075,  # Placeholder: target <8%
-            "cer": 0.035,
-            "wer_confidence": "high",
-            "improvement_over_base": 0.025,
-        }
-
-        logger.info("WER: {:.2%}", metrics["wer"])
-        logger.info("CER: {:.2%}", metrics["cer"])
-        logger.info("Improvement vs base: {:.2%}", metrics["improvement_over_base"])
-
-        return metrics
+        result = self._not_measured(
+            "ASR", "Run scripts/evaluation/metrics/wer_metrics.py or the notebook ASR table."
+        )
+        result.update({"dataset": str(test_manifest), "num_samples": len(test_data)})
+        return result
 
     def evaluate_tts(self, reference_samples: list[tuple[str, str]]) -> dict:
         """Evaluate TTS on MOS + speaker similarity."""
         logger.info("=" * 60)
         logger.info("TTS Evaluation (MOS / Speaker Similarity)")
         logger.info("=" * 60)
-
-        logger.info("Evaluating {} reference samples...", len(reference_samples))
-
-        # Placeholder: would synthesize and collect MOS ratings
-        mos_scores = [4.2, 4.1, 4.3, 4.0, 4.2]  # Example MOS scores
-        speaker_sims = [0.87, 0.89, 0.85, 0.88, 0.86]
-
-        metrics = {
-            "mos_mean": round(np.mean(mos_scores), 2),
-            "mos_std": round(np.std(mos_scores), 2),
-            "mos_samples": len(mos_scores),
-            "speaker_similarity_mean": round(np.mean(speaker_sims), 3),
-            "speaker_similarity_std": round(np.std(speaker_sims), 3),
-            "achieves_mos_target": np.mean(mos_scores) >= 4.6,
-            "achieves_speaker_sim_target": np.mean(speaker_sims) >= 0.85,
-        }
-
-        logger.info("MOS: {:.2f} ± {:.2f}", metrics["mos_mean"], metrics["mos_std"])
-        logger.info("Speaker Similarity: {:.3f} ± {:.3f}",
-                    metrics["speaker_similarity_mean"],
-                    metrics["speaker_similarity_std"])
-
-        return metrics
+        return self._not_measured(
+            "TTS", "Use UTMOSv2, SECS and back-ASR CER from notebooks/colab_dubbing_ablation.ipynb."
+        )
 
     def evaluate_translation(self) -> dict:
-        """Evaluate translation (SeamlessM4T)."""
+        """Evaluate translation."""
         logger.info("=" * 60)
         logger.info("Translation Evaluation (COMET)")
         logger.info("=" * 60)
-
-        # SeamlessM4T v2 is SOTA; no fine-tune needed
-        # Placeholder COMET scores
-        metrics = {
-            "model": "facebook/seamless-m4t-v2-large",
-            "comet_score": 0.88,
-            "comet_reference_vs_translation": 0.85,
-            "zero_shot": True,
-            "language_pair": "English → Eastern Armenian (hye)",
-            "note": "SOTA model; fine-tuning not recommended",
-        }
-
-        logger.info("COMET: {:.3f}", metrics["comet_score"])
-
-        return metrics
+        return self._not_measured(
+            "Translation",
+            "Use TranslationQualityComputer.compute_comet_batch with reference translations.",
+        )
 
     def evaluate_lipsync(self) -> dict:
         """Evaluate lip-sync (LSE-C/D metrics)."""
         logger.info("=" * 60)
         logger.info("Lip-Sync Evaluation (LSE-C/D)")
         logger.info("=" * 60)
-
-        # Placeholder: would compute on dubbed videos
-        metrics = {
-            "lse_c": 1.2,
-            "lse_d": 1.5,
-            "achieves_lse_c_target": 1.2 < 1.8,
-            "achieves_lse_d_target": 1.5 < 1.8,
-            "note": "Computed after Phase 3 (full dubbing pipeline)",
-        }
-
-        logger.info("LSE-C: {:.2f} (target <1.8)", metrics["lse_c"])
-        logger.info("LSE-D: {:.2f} (target <1.8)", metrics["lse_d"])
-
-        return metrics
+        return self._not_measured(
+            "Lip-sync", "Use the SyncNet scorer in notebooks/colab_dubbing_ablation.ipynb."
+        )
 
     def run_full_evaluation(self, test_manifest: Path, asr_model: Path) -> dict:
         """Run all evaluations."""
@@ -169,22 +121,28 @@ class ComprehensiveEvaluator:
         logger.info("Evaluation Summary")
         logger.info("=" * 60)
 
-        # Check targets
+        # Check targets (None = not measured)
+        m = self.results["metrics"]
+
+        def check(value, ok):
+            return None if value is None else ok(value)
+
         targets_met = {
-            "WER <8%": self.results["metrics"]["asr"].get("wer", 1) < 0.08,
-            "MOS >4.6": self.results["metrics"]["tts"].get("mos_mean", 0) > 4.6,
-            "Speaker Similarity >0.85": self.results["metrics"]["tts"].get("speaker_similarity_mean", 0) > 0.85,
-            "LSE-C <1.8": self.results["metrics"]["lipsync"].get("lse_c", 2) < 1.8,
-            "LSE-D <1.8": self.results["metrics"]["lipsync"].get("lse_d", 2) < 1.8,
+            "WER <8%": check(m["asr"].get("wer"), lambda v: v < 0.08),
+            "MOS >4.6": check(m["tts"].get("mos_mean"), lambda v: v > 4.6),
+            "Speaker Similarity >0.85": check(m["tts"].get("speaker_similarity_mean"), lambda v: v > 0.85),
+            "LSE-C <1.8": check(m["lipsync"].get("lse_c"), lambda v: v < 1.8),
+            "LSE-D <1.8": check(m["lipsync"].get("lse_d"), lambda v: v < 1.8),
         }
 
         for target, met in targets_met.items():
-            status = "✓" if met else "✗"
+            status = "?" if met is None else ("✓" if met else "✗")
             logger.info("  {} {}", status, target)
 
-        met_count = sum(targets_met.values())
+        measured = [v for v in targets_met.values() if v is not None]
         logger.info("")
-        logger.info("Targets met: {}/{}", met_count, len(targets_met))
+        logger.info("Targets met: {}/{} measured ({} not measured)",
+                    sum(measured), len(measured), len(targets_met) - len(measured))
 
         return self.results
 

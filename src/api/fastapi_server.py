@@ -138,7 +138,7 @@ class Metrics:
 
         if torch.cuda.is_available():
             mem_used = torch.cuda.memory_allocated(0) / 1e9
-            mem_total = torch.cuda.get_device_properties(0).total_mem / 1e9
+            mem_total = torch.cuda.get_device_properties(0).total_memory / 1e9
             lines.append("# HELP armtts_gpu_memory_used_gb GPU memory used in GB")
             lines.append("# TYPE armtts_gpu_memory_used_gb gauge")
             lines.append(f"armtts_gpu_memory_used_gb {mem_used:.2f}")
@@ -287,6 +287,7 @@ def create_app() -> FastAPI:
         dialect: str = Form("eastern"),
         skip_lipsync: bool = Form(False),
         keep_background: bool = Form(True),
+        voice_consent: bool = Form(False),
     ):
         """Submit a video dubbing job."""
         try:
@@ -316,6 +317,7 @@ def create_app() -> FastAPI:
                 speaker_path=speaker_path,
                 skip_lipsync=skip_lipsync,
                 keep_background=keep_background,
+                voice_consent=voice_consent,
             )
 
             logger.info("Created job {} for {}", job.job_id, video.filename)
@@ -386,6 +388,7 @@ def _process_job(
     speaker_path: Optional[str] = None,
     skip_lipsync: bool = False,
     keep_background: bool = True,
+    voice_consent: bool = False,
 ):
     """Process dubbing job synchronously in background thread."""
     job = job_queue.get_job(job_id)
@@ -410,6 +413,7 @@ def _process_job(
             src_lang=src_lang,
             tgt_lang=tgt_lang,
             dialect=dialect,
+            voice_consent=voice_consent,
         )
 
         if "error" in result:

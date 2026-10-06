@@ -48,6 +48,7 @@ class GradioDubbingApp:
         dialect: str,
         skip_lipsync: bool,
         no_background: bool,
+        voice_consent: bool,
         progress=gr.Progress(),
     ) -> Tuple[str, str]:
         """Process video through dubbing pipeline."""
@@ -73,6 +74,7 @@ class GradioDubbingApp:
                 src_lang=src_lang,
                 tgt_lang=tgt_lang,
                 dialect=dialect,
+                voice_consent=voice_consent,
             )
 
             progress(0.95, desc="Finalizing...")
@@ -98,6 +100,8 @@ class GradioDubbingApp:
 
 **Translated**: {result.get('translated_text', '')[:120]}...
             """
+            for warning in result.get("warnings", []):
+                summary += f"\n\n**Warning**: {warning}"
 
             return str(output_path), summary
 
@@ -130,6 +134,11 @@ Upload a video and get it dubbed into Armenian with AI-powered speech synthesis 
                         label="Reference Speaker Audio (Optional)",
                         file_types=["audio"],
                         type="filepath",
+                    )
+
+                    voice_consent = gr.Checkbox(
+                        value=False,
+                        label="The speaker in the reference audio consented to voice cloning",
                     )
 
                 with gr.Column(scale=1):
@@ -190,6 +199,7 @@ Upload a video and get it dubbed into Armenian with AI-powered speech synthesis 
                     dialect,
                     skip_lipsync,
                     no_background,
+                    voice_consent,
                 ],
                 outputs=[video_output, summary_output],
             )

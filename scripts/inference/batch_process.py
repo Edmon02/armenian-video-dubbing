@@ -109,6 +109,7 @@ class BatchProcessor:
                     emotion=job_emotion,
                     output_path=str(output_path),
                     skip_lipsync=job_skip_lipsync,
+                    voice_consent=bool(job.get("voice_consent", False)),
                 )
 
                 self.results.append({

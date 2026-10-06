@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
+from fractions import Fraction
 from pathlib import Path
 from typing import Generator
 
@@ -57,6 +58,15 @@ def get_audio_duration(path: str | Path) -> float:
 # Video helpers
 # ============================================================================
 
+def _parse_frame_rate(rate: str) -> float:
+    """Parse an ffprobe rate such as "30000/1001" without eval()."""
+    try:
+        value = float(Fraction(rate))
+    except (ValueError, ZeroDivisionError):
+        return 25.0
+    return value if value > 0 else 25.0
+
+
 def get_video_info(path: str | Path) -> dict:
     """Get video metadata via ffprobe."""
     cmd = [
@@ -79,7 +89,7 @@ def get_video_info(path: str | Path) -> dict:
         "duration": float(info["format"].get("duration", 0)),
         "width": int(video_stream["width"]) if video_stream else 0,
         "height": int(video_stream["height"]) if video_stream else 0,
-        "fps": eval(video_stream.get("r_frame_rate", "25/1")) if video_stream else 25,
+        "fps": _parse_frame_rate(video_stream.get("r_frame_rate", "25/1")) if video_stream else 25,
         "video_codec": video_stream.get("codec_name") if video_stream else None,
         "audio_codec": audio_stream.get("codec_name") if audio_stream else None,
         "audio_sr": int(audio_stream.get("sample_rate", 44100)) if audio_stream else 44100,
@@ -120,7 +130,7 @@ def get_gpu_memory_info() -> dict:
     if not torch.cuda.is_available():
         return {"total": 0, "used": 0, "free": 0}
 
-    total = torch.cuda.get_device_properties(0).total_mem / 1e9
+    total = torch.cuda.get_device_properties(0).total_memory / 1e9
     used = torch.cuda.memory_allocated(0) / 1e9
     cached = torch.cuda.memory_reserved(0) / 1e9
     return {"total": total, "used": used, "cached": cached, "free": total - cached}
@@ -243,9 +253,10 @@ def time_stretch_audio(
             str(output_path),
         ]
     else:
-        # FFmpeg atempo (limited range, chain for extreme values)
+        # atempo is a speed factor (input/output duration), the inverse of
+        # rubberband's --time ratio. Chain filters for values outside 0.5-2.0.
         filters = []
-        remaining = ratio
+        remaining = 1.0 / ratio
         while remaining > 2.0:
             filters.append("atempo=2.0")
             remaining /= 2.0

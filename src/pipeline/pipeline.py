@@ -60,6 +60,18 @@ DIALECT_MAP = {
 }
 
 
+def _escape_filter_value(value: str) -> str:
+    """Escape a value for an FFmpeg filtergraph option (e.g. a drawtext path).
+
+    FFmpeg unescapes twice: once for the filter option list, once for the graph.
+    """
+    for ch in ("\\", "'", ":"):
+        value = value.replace(ch, "\\" + ch)
+    for ch in ("\\", "'", "[", "]", ",", ";"):
+        value = value.replace(ch, "\\" + ch)
+    return value
+
+
 class DubbingPipeline:
     """Complete video dubbing pipeline with segment-level alignment."""
 
@@ -187,6 +199,7 @@ class DubbingPipeline:
         src_lang: str = "eng",
         tgt_lang: str = "hye",
         dialect: str = "eastern",
+        voice_consent: bool = False,
     ) -> dict:
         """Run the complete dubbing pipeline.
 
@@ -200,6 +213,9 @@ class DubbingPipeline:
             src_lang: Source language code.
             tgt_lang: Target language code.
             dialect: Armenian dialect ("eastern" or "western").
+            voice_consent: The speaker in reference_speaker_audio agreed to voice
+                cloning. When ethics.consent_required is set and this is False,
+                the reference is ignored and a stock voice is used.
 
         Returns:
             Dict with status, output_video, transcription, duration_sec.
@@ -228,14 +244,20 @@ class DubbingPipeline:
         # Resolve dialect to language code
         tgt_lang = DIALECT_MAP.get(dialect, tgt_lang)
 
-        # Log voice consent if using voice cloning
+        consent_warning = None
         if reference_speaker_audio and self.ethics.get("consent_required", False):
             speaker_id = Path(reference_speaker_audio).stem
             log_voice_consent(
                 speaker_id=speaker_id,
-                consent_given=True,
+                consent_given=bool(voice_consent),
                 consent_log=self.ethics.get("consent_log_path", "logs/voice_consent.json"),
             )
+            if not voice_consent:
+                consent_warning = (
+                    "Voice cloning skipped: no speaker consent given; using a stock voice"
+                )
+                logger.warning(consent_warning)
+                reference_speaker_audio = None
 
         logger.info("=" * 60)
         logger.info("Starting dubbing: {}", video_path.name)
@@ -321,7 +343,7 @@ class DubbingPipeline:
 
                 logger.info("Dubbing complete: {}", output_path)
 
-                return {
+                result = {
                     "status": "success",
                     "output_video": str(output_video),
                     "transcription": full_text,
@@ -330,6 +352,10 @@ class DubbingPipeline:
                     "emotion": emotion,
                     "duration_sec": original_duration,
                 }
+                warnings = [w for w in (consent_warning, self._translation_warning(translated_segments)) if w]
+                if warnings:
+                    result["warnings"] = warnings
+                return result
 
             except Exception as e:
                 logger.error("Pipeline failed: {}", e)
@@ -375,6 +401,16 @@ class DubbingPipeline:
                 logger.debug("  [{}] '{}' → '{}'", i, seg.get("src_text", "")[:40], seg["text"][:40])
 
         return translated
+
+    @staticmethod
+    def _translation_warning(segments: list) -> Optional[str]:
+        """Report segments left silent because translation failed."""
+        failed = sum(1 for s in segments if s.get("translation_error"))
+        if not failed:
+            return None
+        message = f"{failed}/{len(segments)} segments failed to translate and were left silent"
+        logger.warning(message)
+        return message
 
     def _synthesize_segments(
         self,
@@ -452,6 +488,12 @@ class DubbingPipeline:
 
                 if abs(ratio - 1.0) > 0.05:
                     ratio = max(self.min_compress_ratio, min(self.max_stretch_ratio, ratio))
+                    stretched_duration = audio_duration * ratio
+                    if abs(stretched_duration - target_duration) > 0.05:
+                        logger.debug(
+                            "  Segment {}: stretch clamped to {:.2f} ({:.2f}s for a {:.2f}s slot)",
+                            i, ratio, stretched_duration, target_duration,
+                        )
                     # Use rubberband for quality stretching
                     try:
                         tmp_in = self.temp_dir / f"seg_{i}_in.wav"
@@ -460,13 +502,13 @@ class DubbingPipeline:
                         time_stretch_audio(
                             tmp_in,
                             tmp_out,
-                            target_duration=target_duration,
+                            target_duration=stretched_duration,
                             method=self.timing_method,
                         )
                         audio, _ = load_audio(tmp_out, sr=self.sr)
                     except Exception:
                         # Fallback: simple resampling
-                        target_samples = int(target_duration * self.sr)
+                        target_samples = int(stretched_duration * self.sr)
                         if target_samples > 0:
                             indices = np.linspace(0, len(audio) - 1, target_samples).astype(int)
                             audio = audio[indices]
@@ -563,11 +605,15 @@ class DubbingPipeline:
         # Build video filter for watermark
         vf_filters = []
         if self.ethics.get("add_watermark", False):
-            wm_text = self.ethics.get("watermark_text", "AI-Dubbed")
-            wm_opacity = self.ethics.get("watermark_opacity", 0.3)
+            # textfile= keeps user text out of the filtergraph, so quotes, colons
+            # and % in the watermark cannot break or inject into the ffmpeg filter.
+            wm_file = self.temp_dir / "watermark.txt"
+            wm_file.write_text(str(self.ethics.get("watermark_text", "AI-Dubbed")), encoding="utf-8")
+            wm_path = _escape_filter_value(str(wm_file.resolve()))
+            wm_opacity = float(self.ethics.get("watermark_opacity", 0.3))
             # FFmpeg drawtext filter — bottom-right corner, semi-transparent
             vf_filters.append(
-                f"drawtext=text='{wm_text}':fontsize=18:"
+                f"drawtext=textfile={wm_path}:expansion=none:fontsize=18:"
                 f"fontcolor=white@{wm_opacity}:"
                 f"x=w-tw-10:y=h-th-10"
             )
