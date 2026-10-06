@@ -1,6 +1,6 @@
 ---
 title: README
-emoji: 🇦🇲
+emoji: 🎙️
 colorFrom: red
 colorTo: yellow
 sdk: static
