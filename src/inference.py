@@ -305,8 +305,11 @@ class ASRInference:
 
     @staticmethod
     def _is_hallucinated(text: str) -> bool:
-        """Detect Whisper hallucination (repetitive garbage on silence)."""
-        if not text or len(text) < 10:
+        """Detect Whisper hallucination (repetitive garbage on silence).
+
+        Short lines such as "No!" or "Yes." are real dialogue and are kept.
+        """
+        if not text or not text.strip():
             return True
         # Split into tokens and check repetition ratio
         tokens = text.replace(",", " ").split()
@@ -420,8 +423,15 @@ class TranslationInference:
             }
 
         except Exception as e:
+            # Never pass the source text through: TTS would speak English in the dub.
             logger.error("Translation failed: {}", e)
-            return {"src_text": text, "tgt_text": text, "error": str(e)}
+            return {
+                "src_text": text,
+                "tgt_text": "",
+                "src_lang": src_lang,
+                "tgt_lang": tgt_lang,
+                "error": str(e),
+            }
 
     def translate_segments(
         self,
@@ -452,12 +462,15 @@ class TranslationInference:
                 })
                 continue
             result = self.translate(text, src_lang, tgt_lang)
-            translated_segments.append({
+            translated = {
                 "text": result["tgt_text"],
                 "src_text": text,
                 "start": seg["start"],
                 "end": seg["end"],
-            })
+            }
+            if "error" in result:
+                translated["translation_error"] = result["error"]
+            translated_segments.append(translated)
         return translated_segments
 
     def free_memory(self):

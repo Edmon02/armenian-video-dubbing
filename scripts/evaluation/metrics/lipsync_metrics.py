@@ -26,6 +26,14 @@ except ImportError:
 
 from src.utils.helpers import load_audio, timer
 
+# Mouth tracking below is a stub, so LSE-C/LSE-D from this module would be
+# random numbers. Use the SyncNet scorer in notebooks/colab_dubbing_ablation.ipynb.
+MOUTH_TRACKING_IMPLEMENTED = False
+UNIMPLEMENTED_NOTE = (
+    "LSE-C/LSE-D not implemented here (mouth tracking is a stub); "
+    "use syncnet_python as in notebooks/colab_dubbing_ablation.ipynb"
+)
+
 
 class LipSyncMetricsComputer:
     """Compute lip-sync quality metrics for dubbed videos."""
@@ -61,13 +69,9 @@ class LipSyncMetricsComputer:
         """
         logger.info(f"Computing LSE-C for: {video_path}")
 
-        if not OPENCV_AVAILABLE:
-            logger.warning("OpenCV not available, returning mock LSE-C")
-            return {
-                "lse_c": 1.2,  # Mock value (good score)
-                "confidence": 0.5,
-                "note": "Computed with mock implementation (OpenCV required for real computation)"
-            }
+        if not MOUTH_TRACKING_IMPLEMENTED:
+            logger.warning(UNIMPLEMENTED_NOTE)
+            return {"error": UNIMPLEMENTED_NOTE}
 
         try:
             # Extract mouth movements from video
@@ -114,13 +118,9 @@ class LipSyncMetricsComputer:
         """
         logger.info(f"Computing LSE-D for: {video_path}")
 
-        if not OPENCV_AVAILABLE:
-            logger.warning("OpenCV not available, returning mock LSE-D")
-            return {
-                "lse_d": 1.5,  # Mock value (good score)
-                "offset_ms": 20,
-                "note": "Computed with mock implementation"
-            }
+        if not MOUTH_TRACKING_IMPLEMENTED:
+            logger.warning(UNIMPLEMENTED_NOTE)
+            return {"error": UNIMPLEMENTED_NOTE}
 
         try:
             # Extract features
@@ -257,8 +257,8 @@ class LipSyncMetricsComputer:
         Returns:
             Array of mouth movement features over time
         """
-        if not OPENCV_AVAILABLE:
-            return np.random.rand(300)  # Mock data (300 frames)
+        if not MOUTH_TRACKING_IMPLEMENTED:
+            raise NotImplementedError(UNIMPLEMENTED_NOTE)
 
         cap = cv2.VideoCapture(video_path)
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -466,5 +466,5 @@ if __name__ == "__main__":
     lse_d_result = computer.compute_lse_d_metric(video_path, audio_path)
 
     print("\n=== Lip-Sync Metrics ===")
-    print(f"LSE-C: {lse_c_result.get('lse_c', 'N/A'):.2f}")
-    print(f"LSE-D: {lse_d_result.get('lse_d', 'N/A'):.2f} (offset: {lse_d_result.get('offset_ms', 'N/A'):.0f} ms)")
+    print(f"LSE-C: {lse_c_result.get('lse_c', lse_c_result.get('error', 'N/A'))}")
+    print(f"LSE-D: {lse_d_result.get('lse_d', lse_d_result.get('error', 'N/A'))}")

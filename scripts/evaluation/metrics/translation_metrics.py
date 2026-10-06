@@ -108,33 +108,49 @@ class TranslationQualityComputer:
         Returns:
             Dictionary with COMET score
         """
+        result = self.compute_comet_batch(
+            [source_text], [target_text], [reference_text] if reference_text else None
+        )
+        if "error" in result:
+            return result
+        return {"comet_score": result["comet_score"], "n_samples": 1}
+
+    def compute_comet_batch(
+        self,
+        source_list: List[str],
+        target_list: List[str],
+        reference_list: Optional[List[Optional[str]]] = None,
+        batch_size: int = 16,
+    ) -> Dict:
+        """Score translations with wmt22-comet-da in one batched call.
+
+        wmt22-comet-da is reference-based, so samples without a reference are skipped.
+        """
         if self.comet_model is None:
             logger.warning("COMET model not available")
-            return {"score": 0.5, "note": "COMET not available"}
+            return {"error": "COMET not available"}
+
+        if not reference_list:
+            return {"error": "wmt22-comet-da needs reference translations"}
+
+        samples = [
+            {"src": s, "mt": t, "ref": r}
+            for s, t, r in zip(source_list, target_list, reference_list)
+            if r
+        ]
+        if not samples:
+            return {"error": "wmt22-comet-da needs reference translations"}
 
         try:
             with timer("COMET computation"):
-                # COMET expects (source, translation, reference) tuples
-                # If no reference, use target as reference (will give low score)
-                data = {
-                    "src_language": "eng",
-                    "tgt_language": "hye",
-                    "samples": [{
-                        "src": source_text,
-                        "mt": target_text,
-                        "ref": reference_text or target_text,
-                    }]
-                }
-
-                # This is a simplified version
-                # In practice, batch evaluation is recommended
-                scores = [0.85]  # Mock score for now
-
-                return {
-                    "comet_score": float(np.mean(scores)),
-                    "n_samples": 1,
-                }
-
+                gpus = 1 if str(self.device).startswith("cuda") and torch.cuda.is_available() else 0
+                output = self.comet_model.predict(samples, batch_size=batch_size, gpus=gpus)
+            scores = [float(s) for s in output.scores]
+            return {
+                "comet_score": float(np.mean(scores)),
+                "scores": scores,
+                "n_samples": len(scores),
+            }
         except Exception as e:
             logger.error(f"COMET computation failed: {e}")
             return {"error": str(e)}
@@ -283,13 +299,11 @@ class TranslationQualityComputer:
         bertscore_f1s = []
         semantic_sims = []
 
-        for i, (src, tgt) in enumerate(zip(source_list, target_list)):
-            # COMET
-            if self.comet_model:
-                comet_result = self.compute_comet_score(src, tgt)
-                if "comet_score" in comet_result:
-                    comet_scores.append(comet_result["comet_score"])
+        if self.comet_model and reference_list:
+            comet_result = self.compute_comet_batch(source_list, target_list, reference_list)
+            comet_scores = comet_result.get("scores", [])
 
+        for i, (src, tgt) in enumerate(zip(source_list, target_list)):
             # METEOR
             if METEOR_AVAILABLE:
                 meteor_result = self.compute_meteor_score(tgt, src)  # Use source as reference for demo
@@ -408,15 +422,8 @@ class TranslationQualityComputer:
             sources, targets, references if any(r for r in references) else None
         )
 
-        # Add COMET aggregate if available
-        if self.comet_model and sources:
-            comet_scores = []
-            for src, tgt in zip(sources, targets):
-                r = self.compute_comet_score(src, tgt)
-                if "comet_score" in r:
-                    comet_scores.append(r["comet_score"])
-            if comet_scores:
-                result["comet_score"] = float(np.mean(comet_scores))
+        if "mean_comet" in result:
+            result["comet_score"] = result["mean_comet"]
 
         return result
 

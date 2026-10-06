@@ -240,7 +240,7 @@ tts:
 class TestHelpers:
     def test_load_save_audio(self):
         from src.utils.helpers import load_audio, save_audio
-        audio = np.random.randn(16000).astype(np.float32) * 0.5
+        audio = np.clip(np.random.randn(16000) * 0.3, -0.99, 0.99).astype(np.float32)
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
             save_audio(audio, f.name, sr=16000)
